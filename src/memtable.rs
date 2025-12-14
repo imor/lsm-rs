@@ -36,21 +36,22 @@ pub struct MemtableEntryRef {
 
 impl MemtableEntryRef {
     pub fn get_type(&self) -> DataEntryType {
-        match &self.entry {
+        self.entry.get_type()
+    }
+
+    pub fn get_value(&self) -> Option<&[u8]> {
+        self.entry.get_value()
+    }
+}
+
+impl MemtableEntry {
+    pub fn get_type(&self) -> DataEntryType {
+        match &self {
             MemtableEntry::Value { .. } => DataEntryType::Put,
             MemtableEntry::Deletion { .. } => DataEntryType::Delete,
         }
     }
 
-    pub fn get_value(&self) -> Option<&[u8]> {
-        match &self.entry {
-            MemtableEntry::Value { value, .. } => Some(value),
-            MemtableEntry::Deletion { .. } => None,
-        }
-    }
-}
-
-impl MemtableEntry {
     pub fn get_value(&self) -> Option<&[u8]> {
         match self {
             MemtableEntry::Value { value, .. } => Some(value),
@@ -168,10 +169,7 @@ impl InternalIterator for MemtableIterator {
     }
 
     fn get_entry_type(&self) -> DataEntryType {
-        match self.entry.as_ref().unwrap() {
-            MemtableEntry::Value { .. } => DataEntryType::Put,
-            MemtableEntry::Deletion { .. } => DataEntryType::Delete,
-        }
+        self.entry.as_ref().unwrap().get_type()
     }
 }
 
@@ -257,7 +255,10 @@ impl Memtable {
 
     #[tracing::instrument(skip(self, key))]
     pub fn get(&self, key: &[u8]) -> Option<MemtableEntryRef> {
-        match self.entries.binary_search_by_key(&key, |t| t.0.as_slice()) {
+        match self
+            .entries
+            .binary_search_by_key(&key, |(key, _entry)| key.as_slice())
+        {
             Ok(pos) => Some(MemtableEntryRef {
                 entry: self.entries[pos].1.clone(),
             }),
@@ -265,10 +266,13 @@ impl Memtable {
         }
     }
 
-    /// Get position were to insert the key
+    /// Get position where to insert the key
     /// Will remove existing entries with the same key
     fn get_key_pos(&mut self, key: &[u8]) -> usize {
-        match self.entries.binary_search_by_key(&key, |t| t.0.as_slice()) {
+        match self
+            .entries
+            .binary_search_by_key(&key, |(key, _entry)| key.as_slice())
+        {
             Ok(pos) => {
                 // remove old entry
                 let entry_len = {
