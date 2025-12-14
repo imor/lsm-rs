@@ -125,8 +125,8 @@ impl Database {
         DbIterator::new(
             mem_iters,
             table_iters,
-            min_key.map(|k| k.to_vec()),
-            max_key.map(|k| k.to_vec()),
+            min_key,
+            max_key,
             true,
             #[cfg(feature = "wisckey")]
             self.inner.get_value_log(),
