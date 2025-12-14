@@ -10,6 +10,10 @@ tests: sync-tests async-tests no-compression-tests \
        wisckey-no-compression-tests wisckey-sync-tests \
        monoio-tests monoio-wisckey-tests
 
+tests-windows: sync-tests async-tests no-compression-tests \
+       wisckey-tests \
+       wisckey-no-compression-tests wisckey-sync-tests \
+
 sync-tests:
     cd sync && just default-tests
 

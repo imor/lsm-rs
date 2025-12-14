@@ -33,9 +33,7 @@ impl WriteOp {
     }
 
     pub(crate) fn get_key_length(&self) -> u64 {
-        match self {
-            Self::Put(key, _) | Self::Delete(key) => key.len() as u64,
-        }
+        self.get_key().len() as u64
     }
 
     #[allow(dead_code)]
