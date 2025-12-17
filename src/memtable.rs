@@ -223,8 +223,9 @@ impl MemtableRef {
     }
 
     /// This is only safe to call from the DbLogic while holding the memtable lock
-    pub(crate) unsafe fn get_mut(&mut self) -> &mut Memtable {
-        unsafe { Arc::get_mut_unchecked(&mut self.inner) }
+    /// Returns a mutable reference to the inner Memtable if there are no other references
+    pub(crate) fn get_mut(&mut self) -> &mut Memtable {
+        Arc::get_mut(&mut self.inner).expect("Multiple references to memtable exist - this should not happen when called with proper locking")
     }
 }
 

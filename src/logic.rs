@@ -417,7 +417,7 @@ impl DbLogic {
         opt: &WriteOptions,
     ) -> Result<bool, Error> {
         let mut memtable = self.memtable.write().await;
-        let mem_inner = unsafe { memtable.get_mut() };
+        let mem_inner = memtable.get_mut();
 
         let wal_offset = {
             let writes: Vec<_> = write_batch.writes.iter().map(LogEntry::Write).collect();
