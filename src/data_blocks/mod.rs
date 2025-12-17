@@ -131,11 +131,9 @@ impl DataEntry {
         match self.get_type() {
             DataEntryType::Put => {
                 let entry = EntryRef::SortedTable { entry: self };
-                return Some(entry);
+                Some(entry)
             }
-            DataEntryType::Delete => {
-                return None;
-            }
+            DataEntryType::Delete => None,
         }
     }
 }
@@ -219,13 +217,6 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[cfg(feature = "tokio-uring")]
-    use kioto_uring_executor::test as async_test;
-
-    #[cfg(feature = "monoio")]
-    use monoio::test as async_test;
-
-    #[cfg(not(feature = "_async-io"))]
     use tokio::test as async_test;
 
     #[cfg(feature = "wisckey")]

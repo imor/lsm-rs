@@ -1,25 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-#[cfg(not(feature = "_async-io"))]
 use std::io::Write;
-
-#[cfg(feature = "tokio-uring")]
-use tokio_uring::fs::{File, OpenOptions};
-
-#[cfg(feature = "tokio-uring")]
-use tokio_uring::buf::BoundedBuf;
-
-#[cfg(feature = "monoio")]
-use monoio::fs::{File, OpenOptions};
-
-#[cfg(not(feature = "_async-io"))]
 use std::fs::{File, OpenOptions};
 
-#[cfg(feature = "monoio")]
-use monoio::buf::IoBuf;
 
-use cfg_if::cfg_if;
 
 use crate::wal::{LogInner, PAGE_SIZE};
 use crate::{Error, Params, disk};
@@ -88,17 +72,9 @@ impl WalWriter {
         let fpath = Self::get_file_path(params, fpos);
         log::trace!("Opening file at {fpath:?}");
 
-        cfg_if! {
-            if #[cfg(feature="_async-io")] {
-                let log_file = OpenOptions::new()
-                    .read(true).write(true).create(false).truncate(false)
-                    .open(fpath).await?;
-            } else {
-                 let log_file = OpenOptions::new()
-                    .read(true).write(true).create(false).truncate(false)
-                    .open(fpath)?;
-            }
-        }
+        let log_file = OpenOptions::new()
+            .read(true).write(true).create(false).truncate(false)
+            .open(fpath)?;
 
         Ok(log_file)
     }
@@ -200,19 +176,12 @@ impl WalWriter {
     }
 
     async fn sync(&mut self) {
-        cfg_if! {
-            if #[cfg(feature="_async-io") ] {
-                self.log_file.sync_data().await
-                    .expect("Data sync failed");
-            } else {
-                self.log_file.sync_data()
-                   .expect("Data sync failed");
-            }
-        }
+        self.log_file.sync_data()
+            .expect("Data sync failed");
     }
 
     #[allow(unused_mut)]
-    async fn write_all(&mut self, mut data: Vec<u8>) -> Result<(), std::io::Error> {
+    async fn write_all(&mut self, data: Vec<u8>) -> Result<(), std::io::Error> {
         let mut buf_pos = 0;
         while buf_pos < data.len() {
             let mut file_offset = self.position % PAGE_SIZE;
@@ -225,26 +194,9 @@ impl WalWriter {
             let write_len = (buffer_remaining).min(page_remaining);
 
             assert!(write_len > 0);
-            cfg_if! {
-                if #[cfg(feature="tokio-uring")] {
-                    let to_write = data.slice(buf_pos..buf_pos + write_len);
-                    let (res, buf) = self.log_file.write_all_at(to_write, file_offset as u64).await;
-                    res.expect("Failed to write to log file");
-
-                    data = buf.into_inner();
-                } else if #[cfg(feature="monoio")] {
-                    let to_write = data.slice(buf_pos..buf_pos + write_len);
-                    let (res, buf) = self.log_file.write_all_at(to_write, file_offset as u64).await;
-                    res.expect("Failed to write to log file");
-
-                    data = buf.into_inner();
-
-
-                }else {
-                    let to_write = &data[buf_pos..buf_pos + write_len];
-                    self.log_file.write_all(to_write).expect("Failed to write log file");
-                }
-            }
+            
+            let to_write = &data[buf_pos..buf_pos + write_len];
+            self.log_file.write_all(to_write).expect("Failed to write log file");
 
             buf_pos += write_len;
             self.position += write_len;
@@ -267,12 +219,6 @@ impl WalWriter {
         let fpath = Self::get_file_path(params, file_pos);
         log::trace!("Creating new log file at {fpath:?}");
 
-        cfg_if! {
-            if #[cfg(feature="_async-io")] {
-                File::create(fpath).await
-            } else {
-                File::create(fpath)
-            }
-        }
+        File::create(fpath)
     }
 }

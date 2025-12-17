@@ -919,13 +919,6 @@ mod tests {
 
     use tempfile::TempDir;
 
-    #[cfg(feature = "tokio-uring")]
-    use kioto_uring_executor::test as async_test;
-
-    #[cfg(feature = "monoio")]
-    use monoio::test as async_test;
-
-    #[cfg(not(feature = "_async-io"))]
     use tokio::test as async_test;
 
     use crate::StartMode;

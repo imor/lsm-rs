@@ -16,10 +16,7 @@ use crate::{Error, Key};
 
 use futures::stream::Stream;
 
-#[cfg(feature = "_async-io")]
-type IterFuture = dyn Future<Output = Result<(DbIteratorInner, Option<(Key, EntryRef)>), Error>>;
 
-#[cfg(not(feature = "_async-io"))]
 type IterFuture =
     dyn Future<Output = Result<(DbIteratorInner, Option<(Key, EntryRef)>), Error>> + Send;
 

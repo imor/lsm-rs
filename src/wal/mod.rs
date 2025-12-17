@@ -242,47 +242,20 @@ impl WriteAheadLog {
     fn start_writer(inner: Arc<LogInner>, params: Arc<Params>) -> oneshot::Receiver<()> {
         let (finish_sender, finish_receiver) = oneshot::channel();
 
-        #[cfg(feature = "tokio-uring")]
-        {
-            kioto_uring_executor::spawn_with(move || {
-                Box::pin(async move {
-                    let mut writer = WalWriter::new(params).await;
-                    let mut done = false;
+        let run_writer = async move {
+            let mut writer = WalWriter::new(params).await;
+            let mut done = false;
 
-                    while !done {
-                        done = writer
-                            .update_log(&inner)
-                            .await
-                            .expect("Write-ahead logging task failed");
-                    }
-                    let _ = finish_sender.send(());
-                })
-            });
-        }
-
-        #[cfg(not(feature = "tokio-uring"))]
-        {
-            let run_writer = async move {
-                let mut writer = WalWriter::new(params).await;
-                let mut done = false;
-
-                while !done {
-                    done = writer
-                        .update_log(&inner)
-                        .await
-                        .expect("Write-ahead logging task failed");
-                }
-                let _ = finish_sender.send(());
-            };
-
-            cfg_if::cfg_if! {
-                if #[cfg(feature="monoio")] {
-                    monoio::spawn(run_writer);
-               } else {
-                    tokio::spawn(run_writer);
-                }
+            while !done {
+                done = writer
+                    .update_log(&inner)
+                    .await
+                    .expect("Write-ahead logging task failed");
             }
-        }
+            let _ = finish_sender.send(());
+        };
+
+        tokio::spawn(run_writer);
 
         finish_receiver
     }
@@ -298,47 +271,20 @@ impl WriteAheadLog {
     ) -> oneshot::Receiver<()> {
         let (finish_sender, finish_receiver) = oneshot::channel();
 
-        #[cfg(feature = "tokio-uring")]
-        {
-            kioto_uring_executor::spawn_with(move || {
-                Box::pin(async move {
-                    let mut writer = WalWriter::continue_from(position, params).await;
-                    let mut done = false;
+        let run_writer = async move {
+            let mut writer = WalWriter::continue_from(position, params).await;
+            let mut done = false;
 
-                    while !done {
-                        done = writer
-                            .update_log(&inner)
-                            .await
-                            .expect("Write-ahead logging task failed");
-                    }
-                    let _ = finish_sender.send(());
-                })
-            });
-        }
-
-        #[cfg(not(feature = "tokio-uring"))]
-        {
-            let run_writer = async move {
-                let mut writer = WalWriter::continue_from(position, params).await;
-                let mut done = false;
-
-                while !done {
-                    done = writer
-                        .update_log(&inner)
-                        .await
-                        .expect("Write-ahead logging task failed");
-                }
-                let _ = finish_sender.send(());
-            };
-
-            cfg_if::cfg_if! {
-            if #[cfg(feature="monoio")] {
-                monoio::spawn(run_writer);
-            } else {
-                tokio::spawn(run_writer);
+            while !done {
+                done = writer
+                    .update_log(&inner)
+                    .await
+                    .expect("Write-ahead logging task failed");
             }
-            }
-        }
+            let _ = finish_sender.send(());
+        };
+
+        tokio::spawn(run_writer);
 
         finish_receiver
     }

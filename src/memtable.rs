@@ -47,11 +47,9 @@ impl MemtableEntryRef {
         match self.get_type() {
             DataEntryType::Put => {
                 let entry = EntryRef::Memtable { entry: self };
-                return Some(entry);
+                Some(entry)
             }
-            DataEntryType::Delete => {
-                return None;
-            }
+            DataEntryType::Delete => None,
         }
     }
 }
@@ -104,8 +102,7 @@ impl MemtableIterator {
     }
 }
 
-#[cfg_attr(feature="_async-io", async_trait(?Send))]
-#[cfg_attr(not(feature = "_async-io"), async_trait)]
+#[async_trait]
 impl InternalIterator for MemtableIterator {
     #[tracing::instrument]
     async fn step(&mut self) {

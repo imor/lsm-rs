@@ -8,12 +8,12 @@ description = "Runs a longer test with lots of data"
 readme = "../README.md"
 
 [dependencies]
-kioto-uring-executor = { version="0.3.0-dev", default-features=false, features=["macros"] }
-clap = { version="4", features=["derive"] }
+
+clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 tempfile = "3"
 rand = "0.8"
 
 [dependencies.lsm]
 path = ".."
-features = ["tokio-uring"]
+features = ["snappy-compression", "bloom-filters"]

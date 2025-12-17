@@ -28,7 +28,7 @@ It is recommended to use a tmpfs to not wear out a physical disk"
     workdir_location: String,
 }
 
-#[kioto_uring_executor::main]
+#[tokio::main]
 async fn main() {
     env_logger::init();
 
@@ -72,9 +72,9 @@ async fn main() {
     let tasks: Vec<_> = (1..=args.num_threads)
         .map(|idx| {
             let database = database.clone();
-            kioto_uring_executor::spawn_with(move || {
+            tokio::spawn(async move {
                 let mut rng = rand::thread_rng();
-                Box::pin(async move {
+
                     for count in 1..=args.num_insertions {
                         let key_idx = rng.gen_range(0..args.key_range);
                         let key = format!("key{key_idx}").as_bytes().to_vec();
@@ -92,12 +92,12 @@ async fn main() {
                         }
                     }
                     println!("Thread #{idx} is done");
-                })
+
             })
         })
         .collect();
 
     for task in tasks {
-        task.join().await;
+        task.await.unwrap();
     }
 }

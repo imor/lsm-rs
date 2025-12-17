@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,90 +13,73 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-    - name: Install rustc and clippy nightly
-      uses: dtolnay/rust-toolchain@stable
-      with:
-         toolchain: nightly-2025-05-26
-         components: cargo, rustc, clippy, rustfmt
-    - name: Install Just
-      uses: taiki-e/install-action@v2
-      with:
-        tool: just
-    - name: "Test: Async"
-      run: just async-tests
-      timeout-minutes: 10
-    - name: "Test: Tokio-Uring"
-      run: just tokio-uring-tests
-    - name: "Test: Monoio"
-      run: just monoio-tests
-    - name: "Tests: Sync"
-      run: just sync-tests
-      timeout-minutes: 10
-    - name: "Tests: No compression"
-      run: just no-compression-tests
-      timeout-minutes: 10
-    - name: "Tests: Wisckey"
-      run: just wisckey-tests
-    - name: "Tests: Wisckey with no compression"
-      run: just wisckey-no-compression-tests
-      timeout-minutes: 10
-    - name: "Tests: Sync Wisckey"
-      run: just wisckey-sync-tests
-    - name: "Test: Wisckey and Tokio-Uring"
-      run: just tokio-uring-wisckey-tests
-    - name: "Test: Wisckey and Monoio"
-      run: just monoio-wisckey-tests
-      timeout-minutes: 10
+      - uses: actions/checkout@v4
+      - name: Install rustc and clippy nightly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2025-05-26
+          components: cargo, rustc, clippy, rustfmt
+      - name: Install Just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: "Test: Async"
+        run: just async-tests
+        timeout-minutes: 10
+      - name: "Tests: Sync"
+        run: just sync-tests
+        timeout-minutes: 10
+      - name: "Tests: No compression"
+        run: just no-compression-tests
+        timeout-minutes: 10
+      - name: "Tests: Wisckey"
+        run: just wisckey-tests
+      - name: "Tests: Wisckey with no compression"
+        run: just wisckey-no-compression-tests
+        timeout-minutes: 10
+      - name: "Tests: Sync Wisckey"
+        run: just wisckey-sync-tests
   big-test:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-    - name: Install rustc and clippy nightly
-      uses: dtolnay/rust-toolchain@stable
-      with:
-         toolchain: nightly
-         components: cargo, rustc, clippy, rustfmt
-    - name: Install Just
-      uses: taiki-e/install-action@v2
-      with:
-        tool: just
-    - name: Insert many entries 
-      run: just bigtest-many
-    - name: Insert large entries 
-      run: just bigtest-large
+      - uses: actions/checkout@v4
+      - name: Install rustc and clippy nightly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          components: cargo, rustc, clippy, rustfmt
+      - name: Install Just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Insert many entries
+        run: just bigtest-many
+      - name: Insert large entries
+        run: just bigtest-large
   lint:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-    - name: Install rustc and clippy nightly
-      uses: dtolnay/rust-toolchain@stable
-      with:
-         toolchain: nightly
-         components: cargo, rustc, clippy, rustfmt
-    - name: Install Just
-      uses: taiki-e/install-action@v2
-      with:
-        tool: just
-    - name: "Lint Checks: Tokio (with sync FS)"
-      run: just async-lint
-    - name: "Lint Checks: Tokio-Uring"
-      run: just tokio-uring-lint
-    - name: "Lint Checks: Monoio "
-      run: just monoio-lint
-    - name: "Lint Checks: Synchronous API"
-      run: just sync-lint
-    - name: "Lint Checks: Wisckey"
-      run: just wisckey-lint
-    - name: "Lint Checks: Wisckey with no comrpession"
-      run: just wisckey-lint
-    - name: "Lint Checks: Wisckey and Tokio-Uring"
-      run: just tokio-uring-wisckey-lint
-    - name: "Lint Checks: Wisckey and Monoio"
-      run: just monoio-wisckey-lint
-    - name: "Formatting Checks"
-      run: just check-formatting
-    - name: Check for unused dependencies
-      run: |
-         cargo install cargo-machete
-         cargo machete
+      - uses: actions/checkout@v4
+      - name: Install rustc and clippy nightly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          components: cargo, rustc, clippy, rustfmt
+      - name: Install Just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: "Lint Checks: Tokio (with sync FS)"
+        run: just async-lint
+      - name: "Lint Checks: Synchronous API"
+        run: just sync-lint
+      - name: "Lint Checks: Wisckey"
+        run: just wisckey-lint
+      - name: "Lint Checks: Wisckey with no comrpession"
+        run: just wisckey-lint
+      - name: "Formatting Checks"
+        run: just check-formatting
+      - name: Check for unused dependencies
+        run: |
+          cargo install cargo-machete
+          cargo machete

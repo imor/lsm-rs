@@ -109,16 +109,13 @@ fn get_put_large() {
     let database = Database::new_with_params(StartMode::Open, params.clone())
         .expect("Failed to create database instance");
 
-    let mut iterator = database.iter();
-    let mut pos = 0;
+    let iterator = database.iter();
 
-    while let Some((key, value)) = iterator.next() {
+    for (pos, (key, value)) in iterator.enumerate() {
         let expected_key = format!("key_{pos:05}").into_bytes();
         let expected_value = format!("value_{pos}").repeat(SIZE).into_bytes();
 
         assert_eq!(expected_key, key);
         assert_eq!(expected_value, value.get_value());
-
-        pos += 1;
     }
 }

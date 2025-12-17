@@ -12,13 +12,6 @@ use crate::logic::DbLogic;
 
 use async_trait::async_trait;
 
-#[cfg(feature = "_async-io")]
-#[async_trait(?Send)]
-pub trait Task {
-    async fn run(&self) -> Result<bool, Error>;
-}
-
-#[cfg(not(feature = "_async-io"))]
 #[async_trait]
 pub trait Task: Sync + Send {
     async fn run(&self) -> Result<bool, Error>;
@@ -79,8 +72,7 @@ impl LevelCompactionTask {
     }
 }
 
-#[cfg_attr(feature="_async-io", async_trait(?Send))]
-#[cfg_attr(not(feature = "_async-io"), async_trait)]
+#[async_trait]
 impl Task for MemtableCompactionTask {
     async fn run(&self) -> Result<bool, Error> {
         let did_work = self.datastore.do_memtable_compaction().await?;
@@ -91,8 +83,7 @@ impl Task for MemtableCompactionTask {
     }
 }
 
-#[cfg_attr(feature="_async-io", async_trait(?Send))]
-#[cfg_attr(not(feature = "_async-io"), async_trait)]
+#[async_trait]
 impl Task for LevelCompactionTask {
     async fn run(&self) -> Result<bool, Error> {
         Ok(self.datastore.do_level_compaction().await?)
@@ -184,43 +175,19 @@ impl TaskManager {
         let memtable_update_cond = Arc::new(UpdateCond::new());
         let level_update_cond = Arc::new(UpdateCond::new());
 
-        #[cfg(feature = "tokio-uring")]
-        let mut sring = kioto_uring_executor::new_spawn_ring();
-
         {
             let stop_flag = stop_flag.clone();
             let memtable_update_cond = memtable_update_cond.clone();
             let datastore = datastore.clone();
             let level_update_cond = level_update_cond.clone();
 
-            #[cfg(feature = "tokio-uring")]
-            {
-                kioto_uring_executor::spawn_with(move || {
-                    let hdl = TaskHandle::new(
-                        stop_flag,
-                        memtable_update_cond,
-                        MemtableCompactionTask::new_boxed(datastore, level_update_cond),
-                    );
-                    Box::pin(async move { hdl.work_loop().await })
-                });
-            }
+            let hdl = TaskHandle::new(
+                stop_flag,
+                memtable_update_cond,
+                MemtableCompactionTask::new_boxed(datastore, level_update_cond),
+            );
 
-            #[cfg(not(feature = "tokio-uring"))]
-            {
-                let hdl = TaskHandle::new(
-                    stop_flag,
-                    memtable_update_cond,
-                    MemtableCompactionTask::new_boxed(datastore, level_update_cond),
-                );
-
-                cfg_if::cfg_if! {
-                    if #[cfg(feature="monoio")] {
-                        monoio::spawn(async move { hdl.work_loop().await });
-                    } else {
-                        tokio::spawn(async move { hdl.work_loop().await });
-                    }
-                }
-            }
+            tokio::spawn(async move { hdl.work_loop().await });
         }
 
         let task_group = TaskGroup {
@@ -235,34 +202,13 @@ impl TaskManager {
                 let level_update_cond = level_update_cond.clone();
                 let datastore = datastore.clone();
 
-                #[cfg(feature = "tokio-uring")]
-                {
-                    sring.spawn_with(move || {
-                        let hdl = TaskHandle::new(
-                            stop_flag,
-                            level_update_cond,
-                            LevelCompactionTask::new_boxed(datastore),
-                        );
-                        Box::pin(async move { hdl.work_loop().await })
-                    });
-                }
+                let hdl = TaskHandle::new(
+                    stop_flag,
+                    level_update_cond,
+                    LevelCompactionTask::new_boxed(datastore),
+                );
 
-                #[cfg(not(feature = "tokio-uring"))]
-                {
-                    let hdl = TaskHandle::new(
-                        stop_flag,
-                        level_update_cond,
-                        LevelCompactionTask::new_boxed(datastore),
-                    );
-
-                    cfg_if::cfg_if! {
-                        if #[cfg(feature="monoio")] {
-                            monoio::spawn(async move { hdl.work_loop().await });
-                        } else {
-                            tokio::spawn(async move { hdl.work_loop().await });
-                        }
-                    }
-                }
+                tokio::spawn(async move { hdl.work_loop().await });
             }
 
             let task_group = TaskGroup {

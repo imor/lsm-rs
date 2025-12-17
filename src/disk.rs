@@ -1,47 +1,10 @@
-#[cfg(feature = "tokio-uring")]
-use tokio_uring::fs;
-
-#[cfg(feature = "monoio")]
-use monoio::fs;
-
-#[cfg(not(feature = "_async-io"))]
 use std::fs;
-
-#[cfg(not(feature = "_async-io"))]
 use std::io::{Read, Seek, Write};
-
 use std::path::Path;
 
 use cfg_if::cfg_if;
 
 /// Read from the offset to the end of the file
-///
-/// - This is not supported by tokio-uring yet, so it is added as a helper function here
-#[cfg(feature = "_async-io")]
-#[inline(always)]
-#[tracing::instrument]
-pub async fn read_uncompressed(fpath: &Path, offset: u64) -> Result<Vec<u8>, std::io::Error> {
-    let file = fs::File::open(fpath).await?;
-    let mut buffer = vec![0u8; 4096];
-    let mut result = vec![];
-    let mut pos = offset;
-
-    loop {
-        let (res, buf) = file.read_at(buffer, pos).await;
-
-        match res {
-            Ok(0) => return Ok(result),
-            Ok(n) => {
-                buffer = buf;
-                result.extend_from_slice(&buffer[..n]);
-                pos += n as u64;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-}
-
-#[cfg(not(feature = "_async-io"))]
 #[inline(always)]
 #[tracing::instrument]
 pub async fn read_uncompressed(fpath: &Path, offset: u64) -> Result<Vec<u8>, std::io::Error> {
@@ -105,61 +68,29 @@ pub async fn write(fpath: &Path, data: &[u8]) -> Result<(), std::io::Error> {
 #[tracing::instrument(skip(data))]
 #[inline(always)]
 pub async fn write_uncompressed(fpath: &Path, data: Vec<u8>) -> Result<(), std::io::Error> {
-    cfg_if! {
-        if #[ cfg(feature="_async-io") ] {
-            let file = fs::OpenOptions::new().create(true)
-                .truncate(true).write(true)
-                .open(fpath).await?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(fpath)?;
 
-            let (res, _buf) = file.write_all_at(data, 0).await;
-            res?;
-            file.sync_all().await?;
-        } else {
-            let mut file = fs::OpenOptions::new().create(true)
-                .truncate(true).write(true)
-                .open(fpath)?;
-
-            file.write_all(&data)?;
-            file.sync_all()?;
-        }
-    }
+    file.write_all(&data)?;
+    file.sync_all()?;
 
     Ok(())
 }
 
 pub async fn remove_file(fpath: &Path) -> Result<(), std::io::Error> {
-    cfg_if! {
-        if #[ cfg(feature="tokio-uring") ] {
-            tokio_uring::fs::remove_file(fpath).await
-        } else {
-            std::fs::remove_file(fpath)?;
-            Ok(())
-        }
-    }
+    std::fs::remove_file(fpath)?;
+    Ok(())
 }
 
 pub fn remove_dir_all(path: &Path) -> Result<(), std::io::Error> {
-    cfg_if! {
-        if #[ cfg(feature="_async-io") ] {
-            // Not yet supported in tokio_uring
-            std::fs::remove_dir_all(path)?
-        } else {
-            fs::remove_dir_all(path)?;
-        }
-    }
-
+    fs::remove_dir_all(path)?;
     Ok(())
 }
 
 pub fn create_dir(path: &Path) -> Result<(), std::io::Error> {
-    cfg_if! {
-        if #[ cfg(feature="_async-io") ] {
-            // Not yet supported in tokio_uring
-            std::fs::create_dir(path)?
-        } else {
-            fs::create_dir(path)?;
-        }
-    }
-
+    fs::create_dir(path)?;
     Ok(())
 }
