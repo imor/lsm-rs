@@ -137,3 +137,29 @@ pub async fn remove_file(fpath: &Path) -> Result<(), std::io::Error> {
         }
     }
 }
+
+pub fn remove_dir_all(path: &Path) -> Result<(), std::io::Error> {
+    cfg_if! {
+        if #[ cfg(feature="_async-io") ] {
+            // Not yet supported in tokio_uring
+            std::fs::remove_dir_all(path)?
+        } else {
+            fs::remove_dir_all(path)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn create_dir(path: &Path) -> Result<(), std::io::Error> {
+    cfg_if! {
+        if #[ cfg(feature="_async-io") ] {
+            // Not yet supported in tokio_uring
+            std::fs::create_dir(path)?
+        } else {
+            fs::create_dir(path)?;
+        }
+    }
+
+    Ok(())
+}

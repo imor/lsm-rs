@@ -1,15 +1,13 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-#[cfg(not(feature = "_async-io"))]
-use std::fs;
-
 use tokio::sync::RwLock;
 use tokio_condvar::Condvar;
 
 use cfg_if::cfg_if;
 
 use crate::data_blocks::{DataBlocks, DataEntryType};
+use crate::disk::{create_dir, remove_dir_all};
 use crate::level::Level;
 use crate::level_logger::LevelLogger;
 use crate::manifest::{LevelId, Manifest};
@@ -97,16 +95,12 @@ impl DbLogic {
                         params.db_path.to_str().unwrap()
                     );
 
-                    cfg_if! {
-                        if #[ cfg(feature="_async-io") ] {
-                            // Not yet supported in tokio_uring
-                            std::fs::remove_dir_all(&params.db_path)
-                                .expect("Failed to remove existing database");
-                        } else {
-                            fs::remove_dir_all(&params.db_path)
-                                .expect("Failed to remove existing database");
-                        }
-                    }
+                    remove_dir_all(&params.db_path).map_err(|e| {
+                        Error::from_io_error(
+                            format!("Failed to remove existing database: folder: {e}",),
+                            e,
+                        )
+                    })?;
                 }
 
                 true
@@ -122,29 +116,13 @@ impl DbLogic {
         let value_log;
 
         if create {
-            cfg_if! {
-                if #[ cfg(feature="_async-io") ] {
-                    // Not yet supported in tokio_uring
-                    match std::fs::create_dir(&params.db_path) {
-                        Ok(()) => {
-                            log::info!("Created database folder at \"{}\"", params.db_path.to_str().unwrap())
-                        }
-                        Err(err) => {
-                            return Err(Error::from_io_error(format!("Failed to create DB folder: {err}"), err));
-                        }
-                    }
-                } else {
-                    #[ cfg(not(feature="_async-io")) ]
-                    match fs::create_dir(&params.db_path) {
-                        Ok(()) => {
-                            log::info!("Created database folder at \"{}\"", params.db_path.to_str().unwrap())
-                        }
-                        Err(err) => {
-                            return Err(Error::from_io_error(format!("Failed to create DB folder: {err}"), err));
-                        }
-                    }
-                }
-            }
+            create_dir(&params.db_path).map_err(|e| {
+                Error::from_io_error(format!("Failed to create DB folder: {e}",), e)
+            })?;
+            log::info!(
+                "Created database folder at \"{}\"",
+                params.db_path.to_str().unwrap()
+            );
 
             manifest = Arc::new(Manifest::new(params.clone()).await);
             memtable = RwLock::new(MemtableRef::wrap(Memtable::new(1)));
