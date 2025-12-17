@@ -9,8 +9,10 @@ use lru::LruCache;
 
 use zerocopy::FromBytes;
 
+#[cfg(not(feature = "wisckey"))]
+use crate::EntryRef;
+use crate::Params;
 use crate::manifest::Manifest;
-use crate::{EntryRef, Params};
 use crate::{WriteOp, disk};
 
 mod builder;
@@ -127,6 +129,7 @@ impl DataEntry {
         }
     }
 
+    #[cfg(not(feature = "wisckey"))]
     pub fn get_entry_ref(self) -> Option<EntryRef> {
         match self.get_type() {
             DataEntryType::Put => {
