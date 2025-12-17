@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 
 use lsm::{Database, Params, StartMode};
 
@@ -73,26 +73,25 @@ async fn main() {
         .map(|idx| {
             let database = database.clone();
             tokio::spawn(async move {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rngs::StdRng::from_entropy();
 
-                    for count in 1..=args.num_insertions {
-                        let key_idx = rng.gen_range(0..args.key_range);
-                        let key = format!("key{key_idx}").as_bytes().to_vec();
+                for count in 1..=args.num_insertions {
+                    let key_idx = rng.gen_range(0..args.key_range);
+                    let key = format!("key{key_idx}").as_bytes().to_vec();
 
-                        let mut value = vec![0; args.entry_size];
-                        rng.fill(value.as_mut_slice());
+                    let mut value = vec![0; args.entry_size];
+                    rng.fill(value.as_mut_slice());
 
-                        database.put(key, value).await.expect("Insert failed");
+                    database.put(key, value).await.expect("Insert failed");
 
-                        if count % 10_000 == 0 {
-                            println!(
-                                "Thread #{idx} inserted {count} entries so far ({}%)",
-                                (count as f64) * 100.0 / (args.num_insertions as f64)
-                            );
-                        }
+                    if count % 10_000 == 0 {
+                        println!(
+                            "Thread #{idx} inserted {count} entries so far ({}%)",
+                            (count as f64) * 100.0 / (args.num_insertions as f64)
+                        );
                     }
-                    println!("Thread #{idx} is done");
-
+                }
+                println!("Thread #{idx} is done");
             })
         })
         .collect();
