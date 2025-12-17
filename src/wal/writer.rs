@@ -51,7 +51,7 @@ impl WalWriter {
     pub async fn continue_from(position: usize, params: Arc<Params>) -> Self {
         let fpos = position / PAGE_SIZE;
 
-        let log_file = if position % PAGE_SIZE == 0 {
+        let log_file = if position.is_multiple_of(PAGE_SIZE) {
             // At the beginning of a new file
             Self::create_file(&params, fpos)
                 .await

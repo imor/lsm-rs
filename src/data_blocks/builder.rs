@@ -61,7 +61,7 @@ impl DataBlockBuilder {
         #[cfg(not(feature = "wisckey"))] entry_data: &[u8],
         #[cfg(feature = "wisckey")] value_ref: ValueId,
     ) {
-        if self.position % self.data_blocks.params.block_restart_interval == 0 {
+        if self.position.is_multiple_of(self.data_blocks.params.block_restart_interval) {
             assert!(key.prefix_len == 0);
             self.restart_list.push(self.data.len() as u32);
         }

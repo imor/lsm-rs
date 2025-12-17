@@ -79,23 +79,7 @@ pub struct DbLogic {
 
 impl DbLogic {
     pub async fn new(start_mode: StartMode, params: Params) -> Result<Self, Error> {
-        if params.db_path.components().next().is_none() {
-            return Err(Error::InvalidParams(
-                "DB path must not be empty!".to_string(),
-            ));
-        }
-
-        if params.db_path.exists() && !params.db_path.is_dir() {
-            return Err(Error::InvalidParams(
-                "DB path must be a folder!".to_string(),
-            ));
-        }
-
-        let level_logger = if let Some(path) = &params.log_level_stats {
-            Some(LevelLogger::new(path, params.num_levels))
-        } else {
-            None
-        };
+        params.validate()?;
 
         let create = match start_mode {
             StartMode::CreateOrOpen => !params.db_path.exists(),
@@ -201,10 +185,6 @@ impl DbLogic {
 
         let data_blocks = Arc::new(DataBlocks::new(params.clone(), manifest.clone()));
 
-        if params.num_levels == 0 {
-            panic!("Need at least one level!");
-        }
-
         let mut levels = Vec::new();
         for index in 0..params.num_levels {
             let index = index as LevelId;
@@ -219,6 +199,8 @@ impl DbLogic {
                 }
             }
         }
+
+        let level_logger = params.create_level_logger();
 
         Ok(Self {
             manifest,

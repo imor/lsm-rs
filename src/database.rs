@@ -8,6 +8,7 @@ use std::sync::Arc;
 /// The main database structure
 /// This struct can be accessed concurrently and you should
 /// never instantiate it more than once for the same on-disk files
+#[derive(Clone)]
 pub struct Database {
     inner: Arc<DbLogic>,
     tasks: Arc<TaskManager>,

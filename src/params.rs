@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::{Error, level_logger::LevelLogger};
+
 /// Parameters to customize the creation of the database
 #[derive(Debug, Clone)]
 pub struct Params {
@@ -23,6 +25,36 @@ pub struct Params {
     pub compaction_concurrency: usize,
     /// How many seeks (per kb) before compaction is triggered?
     pub seek_based_compaction: Option<u32>,
+}
+
+impl Params {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.db_path.components().next().is_none() {
+            return Err(Error::InvalidParams(
+                "DB path must not be empty!".to_string(),
+            ));
+        }
+
+        if self.db_path.exists() && !self.db_path.is_dir() {
+            return Err(Error::InvalidParams(
+                "DB path must be a folder!".to_string(),
+            ));
+        }
+
+        if self.num_levels == 0 {
+            return Err(Error::InvalidParams(
+                "There must be at least one level!".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn create_level_logger(&self) -> Option<LevelLogger> {
+        self.log_level_stats
+            .as_ref()
+            .map(|path| LevelLogger::new(path, self.num_levels))
+    }
 }
 
 impl Default for Params {

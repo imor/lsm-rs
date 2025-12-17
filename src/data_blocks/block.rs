@@ -203,7 +203,7 @@ impl DataBlock {
         let offset_len = std::mem::size_of::<u32>();
         let rl_len = self.data.len() - self.restart_list_start;
 
-        assert!(rl_len % offset_len == 0);
+        assert!(rl_len.is_multiple_of(offset_len));
         rl_len / offset_len
     }
 

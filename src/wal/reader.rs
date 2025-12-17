@@ -193,7 +193,7 @@ impl WalReader {
                     .copy_from_slice(&self.current_page[offset..offset + len]);
                 buffer_pos += len;
                 self.position += len;
-            } else if self.position % PAGE_SIZE != 0 {
+            } else if !self.position.is_multiple_of(PAGE_SIZE) {
                 log::trace!(
                     "WAL reader is done. Current file was not full; assuming it is the most recent."
                 );
@@ -202,7 +202,7 @@ impl WalReader {
             }
 
             // Move to next file?
-            if self.position % PAGE_SIZE == 0 {
+            if self.position.is_multiple_of(PAGE_SIZE) {
                 let fpos = self.position / PAGE_SIZE;
                 let fpath = WalWriter::get_file_path(&self.params, fpos);
                 log::trace!("Opening next log file at {fpath:?}");

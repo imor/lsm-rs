@@ -11,7 +11,7 @@ struct Inner {
     num_tables: Vec<usize>,
 }
 
-/// Locks changes to the number of tables in a level
+/// Logs changes to the number of tables in a level into a csv file
 pub(crate) struct LevelLogger {
     inner: Mutex<Inner>,
 }
