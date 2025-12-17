@@ -1,28 +1,25 @@
 LOG_LEVEL := "debug"
 
-# Common prefix for lints
 CLIPPY := "cargo clippy --no-default-features --tests"
 
 all: tests lint
 
-tests: sync-tests async-tests no-compression-tests \
+tests: sync-tests async-tests \
        wisckey-tests \
-       wisckey-no-compression-tests wisckey-sync-tests
+       wisckey-no-compression-tests \
+       wisckey-sync-tests
 
 sync-tests:
     cd sync && just default-tests
 
 async-tests:
-    env RUST_BACKTRACE=1 RUST_LOG={{LOG_LEVEL}} cargo test --no-default-features
-
-no-compression-tests:
-    env RUST_BACKTRACE=1 RUST_LOG={{LOG_LEVEL}} cargo test --no-default-features
+    env RUST_BACKTRACE=1 RUST_LOG={{LOG_LEVEL}} cargo nextest run --no-default-features
 
 wisckey-tests:
-    env RUST_BACKTRACE=1 RUST_LOG={{LOG_LEVEL}} cargo test --no-default-features --features=snappy-compression,wisckey
+    env RUST_BACKTRACE=1 RUST_LOG={{LOG_LEVEL}} cargo nextest run --no-default-features --features=snappy-compression,wisckey
 
 wisckey-no-compression-tests:
-    env RUST_BACKTRACE=1 RUST_LOG={{LOG_LEVEL}} cargo test --no-default-features --features=wisckey
+    env RUST_BACKTRACE=1 RUST_LOG={{LOG_LEVEL}} cargo nextest run --no-default-features --features=wisckey
 
 wisckey-sync-tests:
     cd sync && just wisckey-tests
