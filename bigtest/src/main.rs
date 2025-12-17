@@ -73,10 +73,10 @@ async fn main() {
         .map(|idx| {
             let database = database.clone();
             tokio::spawn(async move {
-                let mut rng = rand::rngs::StdRng::from_entropy();
+                let mut rng = rand::rngs::SmallRng::from_rng(&mut rand::rng());
 
                 for count in 1..=args.num_insertions {
-                    let key_idx = rng.gen_range(0..args.key_range);
+                    let key_idx = rng.random_range(0..args.key_range);
                     let key = format!("key{key_idx}").as_bytes().to_vec();
 
                     let mut value = vec![0; args.entry_size];

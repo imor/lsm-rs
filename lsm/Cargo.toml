@@ -1,0 +1,66 @@
+[package]
+name = "lsm"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "An implementation of log-structured merge trees in pure Rust"
+license.workspace = true
+readme.workspace = true
+keywords = ["storage", "database", "async"]
+
+[dependencies]
+async-trait.workspace = true
+bitvec = { workspace = true, optional = true }
+bloomfilter = { workspace = true, optional = true }
+byte-slice-cast.workspace = true
+cfg-if.workspace = true
+csv.workspace = true
+futures.workspace = true
+log.workspace = true
+lru.workspace = true
+memmap2.workspace = true
+parking_lot.workspace = true
+snap = { workspace = true, optional = true }
+tokio = { workspace = true, features = [
+    "io-util",
+    "sync",
+    "macros",
+    "tracing",
+    "time",
+] }
+tokio-condvar.workspace = true
+tracing.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+clap.workspace = true
+env_logger.workspace = true
+rand.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+] }
+tracing-subscriber.workspace = true
+tracing-tracy.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["snappy-compression", "bloom-filters"]
+snappy-compression = ["dep:snap"]
+wisckey = ["dep:bitvec"]
+bloom-filters = ["dep:bloomfilter"]
+
+[[test]]
+name = "basic"
+path = "tests/basic.rs"
+
+[[test]]
+name = "reopen"
+path = "tests/reopen.rs"
+
+[[example]]
+name = "lsm-benchmark"
+path = "benchmarks/async.rs"

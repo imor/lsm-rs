@@ -1,26 +1,22 @@
 [package]
 name = "lsm-sync"
-version = "0.5.0-dev"
-authors = ["Kai Mast <kai@kaimast.com>"]
-edition = "2024"
-repository = "https://github.com/kaimast/lsm-rs"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
 description = "Synchronous API for the lsm crate"
-license = "MIT"
+license.workspace = true
 readme = "../README.md"
 keywords = ["storage", "database", "async"]
 
 [dependencies]
-lsm = { path="..", version="0.5.0-dev" }
-cfg-if = "1"
-
-[dependencies.tokio]
-version="1"
-default-features=false
-features=["rt-multi-thread", "io-util", "sync", "macros", "tracing"]
+lsm.workspace = true
+cfg-if.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "sync", "macros", "tracing"] }
 
 [dev-dependencies]
-env_logger = "0.11"
-tempfile = "3"
+env_logger.workspace = true
+tempfile.workspace = true
 
 [features]
 default = ["snappy-compression", "bloom-filters"]
