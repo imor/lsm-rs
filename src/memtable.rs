@@ -42,6 +42,18 @@ impl MemtableEntryRef {
     pub fn get_value(&self) -> Option<&[u8]> {
         self.entry.get_value()
     }
+
+    pub fn get_entry_ref(self) -> Option<EntryRef> {
+        match self.get_type() {
+            DataEntryType::Put => {
+                let entry = EntryRef::Memtable { entry: self };
+                return Some(entry);
+            }
+            DataEntryType::Delete => {
+                return None;
+            }
+        }
+    }
 }
 
 impl MemtableEntry {

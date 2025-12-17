@@ -368,41 +368,28 @@ impl DbLogic {
     #[cfg(not(feature = "wisckey"))]
     #[tracing::instrument(skip(self, key))]
     pub async fn get(&self, key: &[u8]) -> Result<(bool, Option<EntryRef>), Error> {
-        let mut compaction_triggered = false;
-
+        // First look in memtable
         {
             let memtable = self.memtable.read().await;
 
             if let Some(entry) = memtable.get().get(key) {
-                match entry.get_type() {
-                    DataEntryType::Put => {
-                        let entry = EntryRef::Memtable { entry };
-                        return Ok((compaction_triggered, Some(entry)));
-                    }
-                    DataEntryType::Delete => {
-                        return Ok((compaction_triggered, None));
-                    }
-                }
+                return Ok((false, entry.get_entry_ref()));
             }
         }
 
+        // Next check in immutable memtables
         {
             let imm_mems = self.imm_memtables.read().await;
 
             for (_, imm) in imm_mems.iter().rev() {
                 if let Some(entry) = imm.get().get(key) {
-                    match entry.get_type() {
-                        DataEntryType::Put => {
-                            let entry = EntryRef::Memtable { entry };
-                            return Ok((compaction_triggered, Some(entry)));
-                        }
-                        DataEntryType::Delete => {
-                            return Ok((compaction_triggered, None));
-                        }
-                    }
+                    return Ok((false, entry.get_entry_ref()));
                 }
             }
         }
+
+        // Finally check in levels
+        let mut compaction_triggered = false;
 
         for level in self.levels.iter() {
             let (level_compact_triggered, result) = level.get(key).await;
@@ -411,15 +398,7 @@ impl DbLogic {
             }
 
             if let Some(entry) = result {
-                match entry.get_type() {
-                    DataEntryType::Put => {
-                        let entry = EntryRef::SortedTable { entry };
-                        return Ok((compaction_triggered, Some(entry)));
-                    }
-                    DataEntryType::Delete => {
-                        return Ok((compaction_triggered, None));
-                    }
-                }
+                return Ok((compaction_triggered, entry.get_entry_ref()));
             }
         }
 

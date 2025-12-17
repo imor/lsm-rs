@@ -9,8 +9,8 @@ use lru::LruCache;
 
 use zerocopy::FromBytes;
 
-use crate::Params;
 use crate::manifest::Manifest;
+use crate::{EntryRef, Params};
 use crate::{WriteOp, disk};
 
 mod builder;
@@ -124,6 +124,18 @@ impl DataEntry {
             None
         } else {
             panic!("Unknown write op");
+        }
+    }
+
+    pub fn get_entry_ref(self) -> Option<EntryRef> {
+        match self.get_type() {
+            DataEntryType::Put => {
+                let entry = EntryRef::SortedTable { entry: self };
+                return Some(entry);
+            }
+            DataEntryType::Delete => {
+                return None;
+            }
         }
     }
 }
