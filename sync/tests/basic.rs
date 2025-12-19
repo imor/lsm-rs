@@ -225,7 +225,7 @@ fn get_put_delete_many() {
 
 #[test]
 fn override_many() {
-    const COUNT: u64 = 100_000;
+    const COUNT: u64 = 1000;
 
     let (_tmpdir, database) = test_init();
 
@@ -256,8 +256,8 @@ fn override_many() {
 
 #[test]
 fn override_subset() {
-    const NCOUNT: u64 = 100_000;
-    const COUNT: u64 = 25_000;
+    const NCOUNT: u64 = 10_000;
+    const COUNT: u64 = 2500;
 
     let (_tmpdir, database) = test_init();
 

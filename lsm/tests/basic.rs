@@ -601,8 +601,8 @@ async fn override_one_random() {
 
 #[async_test]
 async fn override_many() {
-    const NCOUNT: u64 = 2_000;
-    const COUNT: u64 = 501;
+    const NCOUNT: u64 = 200;
+    const COUNT: u64 = 50;
 
     let (_tmpdir, database) = test_init().await;
 

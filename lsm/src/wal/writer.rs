@@ -1,9 +1,7 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::io::Write;
-use std::fs::{File, OpenOptions};
-
-
 
 use crate::wal::{LogInner, PAGE_SIZE};
 use crate::{Error, Params, disk};
@@ -73,7 +71,10 @@ impl WalWriter {
         log::trace!("Opening file at {fpath:?}");
 
         let log_file = OpenOptions::new()
-            .read(true).write(true).create(false).truncate(false)
+            .read(true)
+            .write(true)
+            .create(false)
+            .truncate(false)
             .open(fpath)?;
 
         Ok(log_file)
@@ -90,9 +91,9 @@ impl WalWriter {
             {
                 let mut lock = inner.status.write();
                 let to_write = std::mem::take(&mut lock.queue);
-                let sync_flag = lock.sync_flag;
+                let sync_flag = lock.sync_requested;
                 let sync_pos = lock.sync_pos;
-                let stop_flag = lock.stop_flag;
+                let stop_flag = lock.stop_requested;
 
                 let new_offset = if lock.offset_pos > lock.flush_pos {
                     Some((lock.offset_pos, lock.flush_pos))
@@ -105,7 +106,7 @@ impl WalWriter {
                 if !to_write.is_empty() || new_offset.is_some() || sync_flag || stop_flag {
                     assert_eq!(self.position, lock.write_pos);
 
-                    lock.sync_flag = false;
+                    lock.sync_requested = false;
                     break (to_write, sync_flag, sync_pos, new_offset, stop_flag);
                 }
 
@@ -176,8 +177,7 @@ impl WalWriter {
     }
 
     async fn sync(&mut self) {
-        self.log_file.sync_data()
-            .expect("Data sync failed");
+        self.log_file.sync_data().expect("Data sync failed");
     }
 
     #[allow(unused_mut)]
@@ -194,9 +194,11 @@ impl WalWriter {
             let write_len = (buffer_remaining).min(page_remaining);
 
             assert!(write_len > 0);
-            
+
             let to_write = &data[buf_pos..buf_pos + write_len];
-            self.log_file.write_all(to_write).expect("Failed to write log file");
+            self.log_file
+                .write_all(to_write)
+                .expect("Failed to write log file");
 
             buf_pos += write_len;
             self.position += write_len;

@@ -46,14 +46,13 @@ enum LogEntryType {
 impl TryFrom<u8> for LogEntryType {
     type Error = ();
 
-    fn try_from(val: u8) -> Result<Self, ()> {
-        for option in [Self::Write, Self::DeleteValue, Self::DeleteBatch] {
-            if val == (option as u8) {
-                return Ok(option);
-            }
+    fn try_from(val: u8) -> Result<LogEntryType, ()> {
+        match val {
+            0 => Ok(LogEntryType::Write),
+            1 => Ok(LogEntryType::DeleteValue),
+            2 => Ok(LogEntryType::DeleteBatch),
+            _ => Err(()),
         }
-
-        Err(())
     }
 }
 
@@ -92,9 +91,6 @@ struct LogStatus {
     /// Pending data to be written
     queue: Vec<Vec<u8>>,
 
-    /// Was a sync requested?
-    sync_flag: bool,
-
     /// Where the current flush offset is
     /// (anything below this is not needed anymore)
     offset_pos: usize,
@@ -102,8 +98,11 @@ struct LogStatus {
     /// How much has actually been flushed? (cleaned up)
     flush_pos: usize,
 
+    /// Was a sync requested?
+    sync_requested: bool,
+
     /// Indicates the log should shut down
-    stop_flag: bool,
+    stop_requested: bool,
 }
 
 impl LogStatus {
@@ -115,8 +114,8 @@ impl LogStatus {
             flush_pos: start_position,
             offset_pos: start_position,
             queue: vec![],
-            sync_flag: false,
-            stop_flag: false,
+            sync_requested: false,
+            stop_requested: false,
         }
     }
 }
@@ -149,22 +148,9 @@ pub struct WriteAheadLog {
 impl WriteAheadLog {
     /// Creates a new and empty write-ahead log
     pub async fn new(params: Arc<Params>) -> Result<Self, Error> {
-        let status = LogStatus {
-            queue_pos: 0,
-            write_pos: 0,
-            sync_pos: 0,
-            flush_pos: 0,
-            offset_pos: 0,
-            queue: vec![],
-            stop_flag: false,
-            sync_flag: false,
-        };
+        let status = LogStatus::new(0, 0);
 
-        let inner = Arc::new(LogInner {
-            status: RwLock::new(status),
-            queue_cond: Default::default(),
-            write_cond: Default::default(),
-        });
+        let inner = Arc::new(LogInner::new(status));
 
         let finish_receiver = Self::start_writer(inner.clone(), params);
 
@@ -172,6 +158,32 @@ impl WriteAheadLog {
             inner,
             finish_receiver: Mutex::new(Some(finish_receiver)),
         })
+    }
+
+    /// Spawns the background task that will actually write
+    /// to the WAL.
+    ///
+    /// There is exactly one task that writes to the log
+    /// so that we have to worry about ordering less.
+    fn start_writer(inner: Arc<LogInner>, params: Arc<Params>) -> oneshot::Receiver<()> {
+        let (finish_sender, finish_receiver) = oneshot::channel();
+
+        let run_writer = async move {
+            let mut writer = WalWriter::new(params).await;
+            let mut done = false;
+
+            while !done {
+                done = writer
+                    .update_log(&inner)
+                    .await
+                    .expect("Write-ahead logging task failed");
+            }
+            let _ = finish_sender.send(());
+        };
+
+        tokio::spawn(run_writer);
+
+        finish_receiver
     }
 
     /// Open an existing log and insert entries into memtable
@@ -232,32 +244,6 @@ impl WriteAheadLog {
             },
             result,
         ))
-    }
-
-    /// Spawns the background task that will actually write
-    /// to the WAL.
-    ///
-    /// There is exactly one task that writes to the log
-    /// so that we have to worry about ordering less.
-    fn start_writer(inner: Arc<LogInner>, params: Arc<Params>) -> oneshot::Receiver<()> {
-        let (finish_sender, finish_receiver) = oneshot::channel();
-
-        let run_writer = async move {
-            let mut writer = WalWriter::new(params).await;
-            let mut done = false;
-
-            while !done {
-                done = writer
-                    .update_log(&inner)
-                    .await
-                    .expect("Write-ahead logging task failed");
-            }
-            let _ = finish_sender.send(());
-        };
-
-        tokio::spawn(run_writer);
-
-        finish_receiver
     }
 
     /// Start the background task that writes to the log
@@ -371,7 +357,7 @@ impl WriteAheadLog {
     pub async fn stop(&self) -> Result<(), Error> {
         log::trace!("Shutting down write-ahead log. Waiting for writer to terminate.");
 
-        self.inner.status.write().stop_flag = true;
+        self.inner.status.write().stop_requested = true;
         self.inner.queue_cond.notify_waiters();
 
         self.finish_receiver
@@ -397,7 +383,7 @@ impl WriteAheadLog {
 
             assert!(lock.sync_pos < lock.write_pos);
 
-            lock.sync_flag = true;
+            lock.sync_requested = true;
             self.inner.queue_cond.notify_waiters();
 
             lock.sync_pos
