@@ -420,9 +420,9 @@ impl DbLogic {
         let mem_inner = memtable.get_mut();
 
         let wal_offset = {
-            let writes: Vec<_> = write_batch.writes.iter().map(LogEntry::Write).collect();
+            let writes = write_batch.writes.iter().map(LogEntry::Write);
 
-            let log_pos = self.wal.store(&writes).await?;
+            let log_pos = self.wal.store(writes).await?;
 
             if opt.sync {
                 self.wal.sync().await?;

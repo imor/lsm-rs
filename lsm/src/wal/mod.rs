@@ -291,11 +291,11 @@ impl WriteAheadLog {
 
     /// Stores an operation and returns the new position in
     /// the logfile
-    #[tracing::instrument(skip(self, batch))]
-    pub async fn store(&self, batch: &[LogEntry<'_>]) -> Result<u64, Error> {
+    #[tracing::instrument(skip(self, entries))]
+    pub async fn store(&self, entries: impl Iterator<Item = LogEntry<'_>>) -> Result<u64, Error> {
         let mut writes = vec![];
 
-        for entry in batch {
+        for entry in entries {
             let mut data = vec![entry.get_type() as u8];
 
             match entry {

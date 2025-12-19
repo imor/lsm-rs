@@ -80,7 +80,7 @@ async fn write_and_sync() {
     let value = vec![2, 3];
     let op = WriteOp::Put(key.clone(), value.clone());
 
-    wal.store(&[LogEntry::Write(&op)]).await.unwrap();
+    wal.store([LogEntry::Write(&op)].into_iter()).await.unwrap();
     wal.sync().await.unwrap();
 
     assert_eq!(wal.inner.status.read().sync_pos, 22);
@@ -97,7 +97,7 @@ async fn write_large_value() {
     let value = vec![1; 2 * PAGE_SIZE];
     let op = WriteOp::Put(key.clone(), value.clone());
 
-    wal.store(&[LogEntry::Write(&op)]).await.unwrap();
+    wal.store([LogEntry::Write(&op)].into_iter()).await.unwrap();
     wal.sync().await.unwrap();
 
     assert_eq!(wal.inner.status.read().sync_pos, 8212);
@@ -114,7 +114,7 @@ async fn reopen() {
     let value = vec![2, 3];
     let op = WriteOp::Put(key.clone(), value.clone());
 
-    wal.store(&[LogEntry::Write(&op)]).await.unwrap();
+    wal.store([LogEntry::Write(&op)].into_iter()).await.unwrap();
     wal.sync().await.unwrap();
     drop(wal);
 
@@ -139,8 +139,12 @@ async fn reopen_with_offset1() {
     let op1 = WriteOp::Put(key1.clone(), value.clone());
     let op2 = WriteOp::Put(key2.clone(), value.clone());
 
-    wal.store(&[LogEntry::Write(&op1)]).await.unwrap();
-    wal.store(&[LogEntry::Write(&op2)]).await.unwrap();
+    wal.store([LogEntry::Write(&op1)].into_iter())
+        .await
+        .unwrap();
+    wal.store([LogEntry::Write(&op2)].into_iter())
+        .await
+        .unwrap();
     wal.sync().await.unwrap();
 
     drop(wal);
@@ -168,8 +172,12 @@ async fn reopen_with_offset_and_cleanup1() {
     let op1 = WriteOp::Put(key1.clone(), value.clone());
     let op2 = WriteOp::Put(key2.clone(), value.clone());
 
-    wal.store(&[LogEntry::Write(&op1)]).await.unwrap();
-    wal.store(&[LogEntry::Write(&op2)]).await.unwrap();
+    wal.store([LogEntry::Write(&op1)].into_iter())
+        .await
+        .unwrap();
+    wal.store([LogEntry::Write(&op2)].into_iter())
+        .await
+        .unwrap();
     wal.sync().await.unwrap();
 
     let offset = 22;
@@ -200,8 +208,12 @@ async fn reopen_with_offset_and_cleanup2() {
     let op1 = WriteOp::Put(key1.clone(), value1.clone());
     let op2 = WriteOp::Put(key2.clone(), value2.clone());
 
-    wal.store(&[LogEntry::Write(&op1)]).await.unwrap();
-    wal.store(&[LogEntry::Write(&op2)]).await.unwrap();
+    wal.store([LogEntry::Write(&op1)].into_iter())
+        .await
+        .unwrap();
+    wal.store([LogEntry::Write(&op2)].into_iter())
+        .await
+        .unwrap();
     wal.sync().await.unwrap();
 
     let offset = 8212;
@@ -233,8 +245,12 @@ async fn reopen_with_offset2() {
     let op1 = WriteOp::Put(key1.clone(), value1.clone());
     let op2 = WriteOp::Put(key2.clone(), value2.clone());
 
-    wal.store(&[LogEntry::Write(&op1)]).await.unwrap();
-    wal.store(&[LogEntry::Write(&op2)]).await.unwrap();
+    wal.store([LogEntry::Write(&op1)].into_iter())
+        .await
+        .unwrap();
+    wal.store([LogEntry::Write(&op2)].into_iter())
+        .await
+        .unwrap();
     wal.sync().await.unwrap();
 
     drop(wal);
@@ -259,7 +275,7 @@ async fn reopen_large_file() {
     let value = vec![2; 2 * PAGE_SIZE];
     let op = WriteOp::Put(key.clone(), value.clone());
 
-    wal.store(&[LogEntry::Write(&op)]).await.unwrap();
+    wal.store([LogEntry::Write(&op)].into_iter()).await.unwrap();
     wal.sync().await.unwrap();
 
     drop(wal);
