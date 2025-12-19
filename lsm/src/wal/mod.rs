@@ -152,38 +152,13 @@ impl WriteAheadLog {
 
         let inner = Arc::new(LogInner::new(status));
 
-        let finish_receiver = Self::start_writer(inner.clone(), params);
+        let writer = WalWriter::new(params);
+        let finish_receiver = Self::start_writer(inner.clone(), writer);
 
         Ok(Self {
             inner,
             finish_receiver: Mutex::new(Some(finish_receiver)),
         })
-    }
-
-    /// Spawns the background task that will actually write
-    /// to the WAL.
-    ///
-    /// There is exactly one task that writes to the log
-    /// so that we have to worry about ordering less.
-    fn start_writer(inner: Arc<LogInner>, params: Arc<Params>) -> oneshot::Receiver<()> {
-        let (finish_sender, finish_receiver) = oneshot::channel();
-
-        let run_writer = async move {
-            let mut writer = WalWriter::new(params).await;
-            let mut done = false;
-
-            while !done {
-                done = writer
-                    .update_log(&inner)
-                    .await
-                    .expect("Write-ahead logging task failed");
-            }
-            let _ = finish_sender.send(());
-        };
-
-        tokio::spawn(run_writer);
-
-        finish_receiver
     }
 
     /// Open an existing log and insert entries into memtable
@@ -207,7 +182,8 @@ impl WriteAheadLog {
 
         let status = LogStatus::new(result.new_position, start_position);
         let inner = Arc::new(LogInner::new(status));
-        let finish_receiver = Self::continue_writer(inner.clone(), result.new_position, params);
+        let writer = WalWriter::continue_from(result.new_position, params);
+        let finish_receiver = Self::start_writer(inner.clone(), writer);
 
         Ok((
             Self {
@@ -235,7 +211,8 @@ impl WriteAheadLog {
 
         let status = LogStatus::new(result.new_position, start_position);
         let inner = Arc::new(LogInner::new(status));
-        let finish_receiver = Self::continue_writer(inner.clone(), result.new_position, params);
+        let writer = WalWriter::continue_from(result.new_position, params);
+        let finish_receiver = Self::start_writer(inner.clone(), writer);
 
         Ok((
             Self {
@@ -246,19 +223,15 @@ impl WriteAheadLog {
         ))
     }
 
-    /// Start the background task that writes to the log
+    /// Spawns the background task that will actually write
+    /// to the WAL.
     ///
-    /// This is similar to `start_writer`, but when we open
-    /// an existing log.
-    fn continue_writer(
-        inner: Arc<LogInner>,
-        position: usize,
-        params: Arc<Params>,
-    ) -> oneshot::Receiver<()> {
+    /// There is exactly one task that writes to the log
+    /// so that we have to worry about ordering less.
+    fn start_writer(inner: Arc<LogInner>, mut writer: WalWriter) -> oneshot::Receiver<()> {
         let (finish_sender, finish_receiver) = oneshot::channel();
 
         let run_writer = async move {
-            let mut writer = WalWriter::continue_from(position, params).await;
             let mut done = false;
 
             while !done {

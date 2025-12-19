@@ -14,8 +14,8 @@ pub struct WalWriter {
 }
 
 impl WalWriter {
-    pub async fn new(params: Arc<Params>) -> Self {
-        let log_file = Self::create_file(&params, 0).await.unwrap_or_else(|err| {
+    pub fn new(params: Arc<Params>) -> Self {
+        let log_file = Self::create_file(&params, 0).unwrap_or_else(|err| {
             panic!(
                 "Failed to create WAL file in directory {:?}: {err}",
                 params.db_path
@@ -30,21 +30,19 @@ impl WalWriter {
     }
 
     /// Start the writer at a specific position after opening a log
-    pub async fn continue_from(position: usize, params: Arc<Params>) -> Self {
+    pub fn continue_from(position: usize, params: Arc<Params>) -> Self {
         let fpos = position / PAGE_SIZE;
 
         let log_file = if position.is_multiple_of(PAGE_SIZE) {
             // At the beginning of a new file
-            Self::create_file(&params, fpos)
-                .await
-                .unwrap_or_else(|err| {
-                    panic!(
-                        "Failed to create WAL file in directory {:?}: {err}",
-                        params.db_path
-                    )
-                })
+            Self::create_file(&params, fpos).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to create WAL file in directory {:?}: {err}",
+                    params.db_path
+                )
+            })
         } else {
-            Self::open_file(&params, fpos).await.unwrap_or_else(|err| {
+            Self::open_file(&params, fpos).unwrap_or_else(|err| {
                 panic!(
                     "Failed to open WAL file in directory {:?}: {err}",
                     params.db_path
@@ -66,7 +64,7 @@ impl WalWriter {
     }
 
     /// Open an existing log file (used during recovery/restart)
-    pub async fn open_file(params: &Params, fpos: usize) -> Result<File, std::io::Error> {
+    pub fn open_file(params: &Params, fpos: usize) -> Result<File, std::io::Error> {
         let fpath = Self::get_file_path(params, fpos);
         log::trace!("Opening file at {fpath:?}");
 
@@ -209,7 +207,7 @@ impl WalWriter {
             // Create a new file?
             if file_offset == PAGE_SIZE {
                 let file_pos = self.position / PAGE_SIZE;
-                self.log_file = Self::create_file(&self.params, file_pos).await?;
+                self.log_file = Self::create_file(&self.params, file_pos)?;
             }
         }
 
@@ -217,7 +215,7 @@ impl WalWriter {
     }
 
     /// Create a new file that is part of the log
-    pub async fn create_file(params: &Params, file_pos: usize) -> Result<File, std::io::Error> {
+    pub fn create_file(params: &Params, file_pos: usize) -> Result<File, std::io::Error> {
         let fpath = Self::get_file_path(params, file_pos);
         log::trace!("Creating new log file at {fpath:?}");
 
