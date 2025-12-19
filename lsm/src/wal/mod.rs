@@ -261,16 +261,16 @@ impl WriteAheadLog {
                 LogEntry::Write(op) => {
                     let op_type = op.get_type();
                     let key = op.get_key();
-                    let klen = op.get_key_length();
-                    let vlen = op.get_value_length();
+                    let key_len = op.get_key_length();
+                    let value_len = op.get_value_length();
 
                     data.extend_from_slice(op_type.as_bytes());
-                    data.extend_from_slice(klen.as_bytes());
+                    data.extend_from_slice(key_len.as_bytes());
                     data.extend_from_slice(key);
 
                     match op {
                         WriteOp::Put(_, value) => {
-                            data.extend_from_slice(vlen.as_bytes());
+                            data.extend_from_slice(value_len.as_bytes());
                             data.extend_from_slice(value);
                         }
                         WriteOp::Delete(_) => {}
@@ -282,36 +282,42 @@ impl WriteAheadLog {
                 LogEntry::DeleteValue(page_id, offset) | LogEntry::DeleteBatch(page_id, offset) => {
                     data.extend_from_slice(page_id.as_bytes());
                     data.extend_from_slice(offset.as_bytes());
+
                     writes.push(data);
                 }
             }
         }
 
-        // Queue write
-        let end_pos = {
-            let mut lock = self.inner.status.write();
-            let mut end_pos = lock.queue_pos;
+        let end_pos = self.queue_write(writes).await;
+        self.wait_for_write_position(end_pos).await;
 
-            for data in writes.into_iter() {
-                let write_len = data.len();
-                lock.queue.push(data);
-                lock.queue_pos += write_len;
-                end_pos += write_len;
-            }
+        Ok(end_pos as u64)
+    }
 
-            self.inner.queue_cond.notify_waiters();
-            end_pos
-        };
+    async fn queue_write(&self, writes: Vec<Vec<u8>>) -> usize {
+        let mut status = self.inner.status.write();
+        let mut end_pos = status.queue_pos;
 
-        // Wait until write has been processed
+        for data in writes {
+            let write_len = data.len();
+            status.queue.push(data);
+            status.queue_pos += write_len;
+            end_pos += write_len;
+        }
+
+        self.inner.queue_cond.notify_waiters();
+        end_pos
+    }
+
+    async fn wait_for_write_position(&self, position: usize) {
         loop {
             let fut = self.inner.write_cond.notified();
             tokio::pin!(fut);
 
             {
-                let lock = self.inner.status.read();
-                if lock.write_pos >= end_pos {
-                    break;
+                let status = self.inner.status.read();
+                if status.write_pos >= position {
+                    return;
                 }
 
                 // Wait for next write
@@ -319,8 +325,6 @@ impl WriteAheadLog {
             }
             fut.await;
         }
-
-        Ok(end_pos as u64)
     }
 
     /// Gracefully stop the write-ahead log
