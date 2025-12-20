@@ -152,7 +152,7 @@ impl WriteAheadLog {
 
         let inner = Arc::new(LogInner::new(status));
 
-        let writer = WalWriter::new(params);
+        let writer = WalWriter::new(params.db_path.clone());
         let finish_receiver = Self::start_writer(inner.clone(), writer);
 
         Ok(Self {
@@ -176,13 +176,13 @@ impl WriteAheadLog {
 
         let start_position = start_position as usize;
 
-        let mut reader = WalReader::new(params.clone(), start_position).await?;
+        let mut reader = WalReader::new(params.db_path.clone(), start_position).await?;
 
         let result = reader.run(memtable, value_index).await?;
 
         let status = LogStatus::new(result.new_position, start_position);
         let inner = Arc::new(LogInner::new(status));
-        let writer = WalWriter::continue_from(result.new_position, params);
+        let writer = WalWriter::continue_from(result.new_position, params.db_path.clone());
         let finish_receiver = Self::start_writer(inner.clone(), writer);
 
         Ok((
@@ -205,13 +205,13 @@ impl WriteAheadLog {
 
         let start_position = start_position as usize;
 
-        let mut reader = WalReader::new(params.clone(), start_position).await?;
+        let mut reader = WalReader::new(params.db_path.clone(), start_position).await?;
 
         let result = reader.run(memtable).await?;
 
         let status = LogStatus::new(result.new_position, start_position);
         let inner = Arc::new(LogInner::new(status));
-        let writer = WalWriter::continue_from(result.new_position, params);
+        let writer = WalWriter::continue_from(result.new_position, params.db_path.clone());
         let finish_receiver = Self::start_writer(inner.clone(), writer);
 
         Ok((

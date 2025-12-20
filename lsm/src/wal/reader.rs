@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use zerocopy::FromBytes;
 
@@ -6,15 +6,15 @@ use zerocopy::FromBytes;
 use crate::values::{ValueBatchId, ValueIndex};
 
 use crate::memtable::Memtable;
-use crate::{Error, Params, disk};
+use crate::{Error, disk};
 
 use super::{LogEntryType, PAGE_SIZE, WalWriter, WriteOp};
 
 /// WAL reader used during recovery
 pub struct WalReader {
-    params: Arc<Params>,
     position: usize,
     current_page: Vec<u8>,
+    db_path: PathBuf,
 }
 
 #[derive(Default)]
@@ -26,11 +26,11 @@ pub struct RecoveryResult {
 }
 
 impl WalReader {
-    pub async fn new(params: Arc<Params>, start_position: usize) -> Result<Self, Error> {
+    pub async fn new(db_path: PathBuf, start_position: usize) -> Result<Self, Error> {
         let position = start_position;
         let fpos = position / PAGE_SIZE;
 
-        let fpath = WalWriter::get_file_path(&params, fpos);
+        let fpath = WalWriter::get_file_path(&db_path, fpos);
         log::trace!("Opening next log file at {fpath:?}");
 
         let current_page = disk::read_uncompressed(&fpath, 0)
@@ -38,9 +38,9 @@ impl WalReader {
             .map_err(|err| Error::from_io_error("Failed to open WAL file", err))?;
 
         Ok(Self {
-            params,
             current_page,
             position,
+            db_path,
         })
     }
 
@@ -204,7 +204,7 @@ impl WalReader {
             // Move to next file?
             if self.position.is_multiple_of(PAGE_SIZE) {
                 let fpos = self.position / PAGE_SIZE;
-                let fpath = WalWriter::get_file_path(&self.params, fpos);
+                let fpath = WalWriter::get_file_path(&self.db_path, fpos);
                 log::trace!("Opening next log file at {fpath:?}");
 
                 self.current_page = match disk::read_uncompressed(&fpath, 0).await {

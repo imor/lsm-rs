@@ -1,71 +1,55 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use crate::wal::{LogInner, PAGE_SIZE};
-use crate::{Error, Params, disk};
+use crate::{Error, disk};
 
 /// The task that actually writes the log to disk
 pub struct WalWriter {
     log_file: File,
     position: usize,
-    params: Arc<Params>,
+    db_path: PathBuf,
 }
 
 impl WalWriter {
-    pub fn new(params: Arc<Params>) -> Self {
-        let log_file = Self::create_file(&params, 0).unwrap_or_else(|err| {
-            panic!(
-                "Failed to create WAL file in directory {:?}: {err}",
-                params.db_path
-            )
+    pub fn new(db_path: PathBuf) -> Self {
+        let log_file = Self::create_file(&db_path, 0).unwrap_or_else(|err| {
+            panic!("Failed to create WAL file in directory {db_path:?}: {err}",)
         });
 
         Self {
             log_file,
-            params,
+            db_path,
             position: 0,
         }
     }
 
     /// Start the writer at a specific position after opening a log
-    pub fn continue_from(position: usize, params: Arc<Params>) -> Self {
+    pub fn continue_from(position: usize, db_path: PathBuf) -> Self {
         let fpos = position / PAGE_SIZE;
 
         let log_file = if position.is_multiple_of(PAGE_SIZE) {
             // At the beginning of a new file
-            Self::create_file(&params, fpos).unwrap_or_else(|err| {
-                panic!(
-                    "Failed to create WAL file in directory {:?}: {err}",
-                    params.db_path
-                )
+            Self::create_file(&db_path, fpos).unwrap_or_else(|err| {
+                panic!("Failed to create WAL file in directory {db_path:?}: {err}",)
             })
         } else {
-            Self::open_file(&params, fpos).unwrap_or_else(|err| {
-                panic!(
-                    "Failed to open WAL file in directory {:?}: {err}",
-                    params.db_path
-                )
+            Self::open_file(&db_path, fpos).unwrap_or_else(|err| {
+                panic!("Failed to open WAL file in directory {db_path:?}: {err}",)
             })
         };
 
         Self {
             log_file,
-            params,
+            db_path,
             position,
         }
     }
 
-    pub fn get_file_path(params: &Params, fpos: usize) -> PathBuf {
-        params
-            .db_path
-            .join(Path::new(&format!("log{:08}.data", fpos + 1)))
-    }
-
     /// Open an existing log file (used during recovery/restart)
-    pub fn open_file(params: &Params, fpos: usize) -> Result<File, std::io::Error> {
-        let fpath = Self::get_file_path(params, fpos);
+    pub fn open_file(db_path: &Path, fpos: usize) -> Result<File, std::io::Error> {
+        let fpath = Self::get_file_path(db_path, fpos);
         log::trace!("Opening file at {fpath:?}");
 
         let log_file = OpenOptions::new()
@@ -161,7 +145,6 @@ impl WalWriter {
 
         for fpos in old_file_pos..new_file_pos {
             let fpath = self
-                .params
                 .db_path
                 .join(Path::new(&format!("log{:08}.data", fpos + 1)));
             log::trace!("Removing file {fpath:?}");
@@ -207,7 +190,7 @@ impl WalWriter {
             // Create a new file?
             if file_offset == PAGE_SIZE {
                 let file_pos = self.position / PAGE_SIZE;
-                self.log_file = Self::create_file(&self.params, file_pos)?;
+                self.log_file = Self::create_file(&self.db_path, file_pos)?;
             }
         }
 
@@ -215,10 +198,14 @@ impl WalWriter {
     }
 
     /// Create a new file that is part of the log
-    pub fn create_file(params: &Params, file_pos: usize) -> Result<File, std::io::Error> {
-        let fpath = Self::get_file_path(params, file_pos);
+    pub fn create_file(db_path: &Path, file_pos: usize) -> Result<File, std::io::Error> {
+        let fpath = Self::get_file_path(db_path, file_pos);
         log::trace!("Creating new log file at {fpath:?}");
 
         File::create(fpath)
+    }
+
+    pub fn get_file_path(db_path: &Path, fpos: usize) -> PathBuf {
+        db_path.join(Path::new(&format!("log{:08}.data", fpos + 1)))
     }
 }
