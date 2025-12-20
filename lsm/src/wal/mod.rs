@@ -77,7 +77,8 @@ const PAGE_SIZE: usize = 4 * 1024;
 ///
 /// Invariants:
 ///  - sync_pos <= write_pos <= queue_pos
-///  - flush_pos <= offset_pos
+///  - prune_pos <= can_prune_pos
+/// 
 struct LogStatus {
     /// Absolute count of queued write operations
     queue_pos: usize,
@@ -85,18 +86,18 @@ struct LogStatus {
     /// Absolute count of fulfilled write operations
     write_pos: usize,
 
-    /// At what write count did we last invoke sync?
+    /// At what write count did we last invoke fsync?
     sync_pos: usize,
 
     /// Pending data to be written
     queue: Vec<Vec<u8>>,
 
-    /// Where the current flush offset is
+    /// Where the current can prune position is
     /// (anything below this is not needed anymore)
-    offset_pos: usize,
+    can_prune_pos: usize,
 
-    /// How much has actually been flushed? (cleaned up)
-    flush_pos: usize,
+    /// How much has actually been cleaned up
+    prune_pos: usize,
 
     /// Was a sync requested?
     sync_requested: bool,
@@ -111,8 +112,8 @@ impl LogStatus {
             queue_pos: position,
             write_pos: position,
             sync_pos: position,
-            flush_pos: start_position,
-            offset_pos: start_position,
+            prune_pos: start_position,
+            can_prune_pos: start_position,
             queue: vec![],
             sync_requested: false,
             stop_requested: false,
@@ -391,14 +392,14 @@ impl WriteAheadLog {
         {
             let mut lock = self.inner.status.write();
 
-            if new_offset <= lock.offset_pos {
+            if new_offset <= lock.can_prune_pos {
                 panic!(
                     "Offset can only be increased! Requested {new_offset}, but was {}",
-                    lock.offset_pos
+                    lock.can_prune_pos
                 );
             }
 
-            lock.offset_pos = new_offset;
+            lock.can_prune_pos = new_offset;
             self.inner.queue_cond.notify_waiters();
         }
 
@@ -410,7 +411,7 @@ impl WriteAheadLog {
 
             {
                 let lock = self.inner.status.read();
-                if lock.flush_pos >= new_offset {
+                if lock.prune_pos >= new_offset {
                     return;
                 }
                 fut.as_mut().enable();

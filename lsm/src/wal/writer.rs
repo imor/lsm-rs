@@ -77,10 +77,10 @@ impl WalWriter {
                 let sync_pos = status.sync_pos;
                 let stop_requested = status.stop_requested;
 
-                let new_offset = if status.offset_pos > status.flush_pos {
-                    Some((status.offset_pos, status.flush_pos))
+                let new_offset = if status.can_prune_pos > status.prune_pos {
+                    Some((status.can_prune_pos, status.prune_pos))
                 } else {
-                    assert_eq!(status.offset_pos, status.flush_pos);
+                    assert_eq!(status.can_prune_pos, status.prune_pos);
                     None
                 };
 
@@ -128,12 +128,12 @@ impl WalWriter {
 
         // Notify about finished write(s)
         {
-            let mut lock = inner.status.write();
-            assert!(lock.write_pos <= self.position);
-            lock.write_pos = self.position;
+            let mut status = inner.status.write();
+            assert!(status.write_pos <= self.position);
+            status.write_pos = self.position;
 
             if let Some((new_offset, _)) = new_offset {
-                lock.flush_pos = new_offset;
+                status.prune_pos = new_offset;
             }
 
             inner.write_cond.notify_waiters();

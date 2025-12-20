@@ -28,12 +28,12 @@ pub struct RecoveryResult {
 impl WalReader {
     pub async fn new(db_path: PathBuf, start_position: usize) -> Result<Self, Error> {
         let position = start_position;
-        let fpos = position / PAGE_SIZE;
+        let file_num = position / PAGE_SIZE;
 
-        let fpath = WalWriter::get_file_path(&db_path, fpos);
-        log::trace!("Opening next log file at {fpath:?}");
+        let file_path = WalWriter::get_file_path(&db_path, file_num);
+        log::trace!("Opening next log file at {file_path:?}");
 
-        let current_page = disk::read_uncompressed(&fpath, 0)
+        let current_page = disk::read_uncompressed(&file_path, 0)
             .await
             .map_err(|err| Error::from_io_error("Failed to open WAL file", err))?;
 
@@ -203,11 +203,11 @@ impl WalReader {
 
             // Move to next file?
             if self.position.is_multiple_of(PAGE_SIZE) {
-                let fpos = self.position / PAGE_SIZE;
-                let fpath = WalWriter::get_file_path(&self.db_path, fpos);
-                log::trace!("Opening next log file at {fpath:?}");
+                let file_num = self.position / PAGE_SIZE;
+                let file_path = WalWriter::get_file_path(&self.db_path, file_num);
+                log::trace!("Opening next log file at {file_path:?}");
 
-                self.current_page = match disk::read_uncompressed(&fpath, 0).await {
+                self.current_page = match disk::read_uncompressed(&file_path, 0).await {
                     Ok(data) => data,
                     Err(err) => {
                         if maybe && err.kind() == std::io::ErrorKind::NotFound {
