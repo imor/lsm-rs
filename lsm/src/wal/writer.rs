@@ -7,19 +7,19 @@ use crate::{Error, disk};
 
 /// The task that actually writes the log to disk
 pub struct WalWriter {
-    log_file: File,
+    wal_file: File,
     position: usize,
     db_path: PathBuf,
 }
 
 impl WalWriter {
     pub fn new(db_path: PathBuf) -> Self {
-        let log_file = Self::create_file(&db_path, 0).unwrap_or_else(|err| {
+        let wal_file = Self::create_file(&db_path, 0).unwrap_or_else(|err| {
             panic!("Failed to create WAL file in directory {db_path:?}: {err}",)
         });
 
         Self {
-            log_file,
+            wal_file,
             db_path,
             position: 0,
         }
@@ -27,73 +27,80 @@ impl WalWriter {
 
     /// Start the writer at a specific position after opening a log
     pub fn continue_from(position: usize, db_path: PathBuf) -> Self {
-        let fpos = position / PAGE_SIZE;
+        let file_num = position / PAGE_SIZE;
 
-        let log_file = if position.is_multiple_of(PAGE_SIZE) {
+        let wal_file = if position.is_multiple_of(PAGE_SIZE) {
             // At the beginning of a new file
-            Self::create_file(&db_path, fpos).unwrap_or_else(|err| {
+            Self::create_file(&db_path, file_num).unwrap_or_else(|err| {
                 panic!("Failed to create WAL file in directory {db_path:?}: {err}",)
             })
         } else {
-            Self::open_file(&db_path, fpos).unwrap_or_else(|err| {
+            Self::open_file(&db_path, file_num).unwrap_or_else(|err| {
                 panic!("Failed to open WAL file in directory {db_path:?}: {err}",)
             })
         };
 
         Self {
-            log_file,
+            wal_file,
             db_path,
             position,
         }
     }
 
     /// Open an existing log file (used during recovery/restart)
-    pub fn open_file(db_path: &Path, fpos: usize) -> Result<File, std::io::Error> {
-        let fpath = Self::get_file_path(db_path, fpos);
-        log::trace!("Opening file at {fpath:?}");
+    pub fn open_file(db_path: &Path, file_num: usize) -> Result<File, std::io::Error> {
+        let file_path = Self::get_file_path(db_path, file_num);
+        log::trace!("Opening file at {file_path:?}");
 
-        let log_file = OpenOptions::new()
+        let wal_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(false)
             .truncate(false)
-            .open(fpath)?;
+            .open(file_path)?;
 
-        Ok(log_file)
+        Ok(wal_file)
     }
 
     /// Returns true if the writer is done and the associated task should terminate
     pub async fn update_log(&mut self, inner: &LogInner) -> Result<bool, Error> {
-        let (to_write, sync_flag, sync_pos, new_offset, stop_flag) = loop {
+        let (to_write, sync_requested, sync_pos, new_offset, stop_requested) = loop {
             // This works around the following bug:
             // https://github.com/rust-lang/rust/issues/63768
             let fut = inner.queue_cond.notified();
             tokio::pin!(fut);
 
             {
-                let mut lock = inner.status.write();
-                let to_write = std::mem::take(&mut lock.queue);
-                let sync_flag = lock.sync_requested;
-                let sync_pos = lock.sync_pos;
-                let stop_flag = lock.stop_requested;
+                let mut status = inner.status.write();
+                let to_write = std::mem::take(&mut status.queue);
+                let sync_requested = status.sync_requested;
+                let sync_pos = status.sync_pos;
+                let stop_requested = status.stop_requested;
 
-                let new_offset = if lock.offset_pos > lock.flush_pos {
-                    Some((lock.offset_pos, lock.flush_pos))
+                let new_offset = if status.offset_pos > status.flush_pos {
+                    Some((status.offset_pos, status.flush_pos))
                 } else {
-                    assert_eq!(lock.offset_pos, lock.flush_pos);
+                    assert_eq!(status.offset_pos, status.flush_pos);
                     None
                 };
 
                 // Check whether there is something to do
-                if !to_write.is_empty() || new_offset.is_some() || sync_flag || stop_flag {
-                    assert_eq!(self.position, lock.write_pos);
+                if !to_write.is_empty() || new_offset.is_some() || sync_requested || stop_requested
+                {
+                    assert_eq!(self.position, status.write_pos);
 
-                    lock.sync_requested = false;
-                    break (to_write, sync_flag, sync_pos, new_offset, stop_flag);
+                    status.sync_requested = false;
+                    break (
+                        to_write,
+                        sync_requested,
+                        sync_pos,
+                        new_offset,
+                        stop_requested,
+                    );
                 }
 
                 // wait for change to queue and retry
-                assert_eq!(lock.write_pos, lock.queue_pos);
+                assert_eq!(status.write_pos, status.queue_pos);
                 fut.as_mut().enable();
             }
 
@@ -101,22 +108,22 @@ impl WalWriter {
         };
 
         // Don't hold lock while write
-        for buf in to_write.into_iter() {
+        for buf in to_write {
             self.write_all(buf)
                 .await
-                .map_err(|err| Error::from_io_error("Failed to writ write-ahead log", err))?;
+                .map_err(|err| Error::from_io_error("Failed to write to wal", err))?;
         }
 
         // Only sync if necessary
         // We do not need to hold the lock while syncing
         // because there is only one write-ahead writer
-        if sync_flag && sync_pos < self.position {
+        if sync_requested && sync_pos < self.position {
             self.sync().await;
             inner.status.write().sync_pos = self.position;
         }
 
         if let Some((new_offset, old_offset)) = new_offset {
-            self.set_offset(new_offset, old_offset).await?;
+            self.set_offset(old_offset, new_offset).await?;
         }
 
         // Notify about finished write(s)
@@ -132,25 +139,23 @@ impl WalWriter {
             inner.write_cond.notify_waiters();
         }
 
-        if stop_flag {
+        if stop_requested {
             log::debug!("WAL writer finished");
         }
 
-        Ok(stop_flag)
+        Ok(stop_requested)
     }
 
-    async fn set_offset(&mut self, new_offset: usize, old_offset: usize) -> Result<(), Error> {
-        let old_file_pos = old_offset / PAGE_SIZE;
-        let new_file_pos = new_offset / PAGE_SIZE;
+    async fn set_offset(&mut self, old_offset: usize, new_offset: usize) -> Result<(), Error> {
+        let old_file_num = old_offset / PAGE_SIZE;
+        let new_file_num = new_offset / PAGE_SIZE;
 
-        for fpos in old_file_pos..new_file_pos {
-            let fpath = self
-                .db_path
-                .join(Path::new(&format!("log{:08}.data", fpos + 1)));
-            log::trace!("Removing file {fpath:?}");
+        for file_num in old_file_num..new_file_num {
+            let file_path = Self::get_file_path(&self.db_path, file_num);
+            log::trace!("Removing file {file_path:?}");
 
-            disk::remove_file(&fpath).await.map_err(|err| {
-                Error::from_io_error(format!("Failed to remove log file {fpath:?}"), err)
+            disk::remove_file(&file_path).await.map_err(|err| {
+                Error::from_io_error(format!("Failed to remove log file {file_path:?}"), err)
             })?;
         }
 
@@ -158,10 +163,10 @@ impl WalWriter {
     }
 
     async fn sync(&mut self) {
-        self.log_file.sync_data().expect("Data sync failed");
+        self.wal_file.sync_data().expect("Data sync failed");
     }
 
-    #[allow(unused_mut)]
+    /// Writes the data to the appropriate wal file
     async fn write_all(&mut self, data: Vec<u8>) -> Result<(), std::io::Error> {
         let mut buf_pos = 0;
         while buf_pos < data.len() {
@@ -177,7 +182,7 @@ impl WalWriter {
             assert!(write_len > 0);
 
             let to_write = &data[buf_pos..buf_pos + write_len];
-            self.log_file
+            self.wal_file
                 .write_all(to_write)
                 .expect("Failed to write log file");
 
@@ -189,8 +194,8 @@ impl WalWriter {
 
             // Create a new file?
             if file_offset == PAGE_SIZE {
-                let file_pos = self.position / PAGE_SIZE;
-                self.log_file = Self::create_file(&self.db_path, file_pos)?;
+                let file_num = self.position / PAGE_SIZE;
+                self.wal_file = Self::create_file(&self.db_path, file_num)?;
             }
         }
 
@@ -198,14 +203,14 @@ impl WalWriter {
     }
 
     /// Create a new file that is part of the log
-    pub fn create_file(db_path: &Path, file_pos: usize) -> Result<File, std::io::Error> {
-        let fpath = Self::get_file_path(db_path, file_pos);
-        log::trace!("Creating new log file at {fpath:?}");
+    pub fn create_file(db_path: &Path, file_num: usize) -> Result<File, std::io::Error> {
+        let file_path = Self::get_file_path(db_path, file_num);
+        log::trace!("Creating new wal file at {file_path:?}");
 
-        File::create(fpath)
+        File::create(file_path)
     }
 
-    pub fn get_file_path(db_path: &Path, fpos: usize) -> PathBuf {
-        db_path.join(Path::new(&format!("log{:08}.data", fpos + 1)))
+    pub fn get_file_path(db_path: &Path, file_num: usize) -> PathBuf {
+        db_path.join(Path::new(&format!("{:08}.wal", file_num + 1)))
     }
 }

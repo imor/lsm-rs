@@ -68,7 +68,7 @@ impl LogEntry<'_> {
     }
 }
 
-/// The log is split individual files (pages) that can be
+/// The log is split into individual files (pages) that can be
 /// garbage collected once the logged data is not needed anymore
 const PAGE_SIZE: usize = 4 * 1024;
 
