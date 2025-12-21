@@ -33,7 +33,7 @@ struct DatabaseMetadata {
     num_levels: u32,
     _padding: u32,
     seq_number_offset: SeqNumber,
-    log_offset: u64,
+    log_offset: usize,
     next_data_block_id: DataBlockId,
     #[cfg(feature = "wisckey")]
     value_log: ValueLogMetadata,
@@ -316,14 +316,14 @@ impl Manifest {
         id
     }
 
-    pub async fn get_log_offset(&self) -> u64 {
+    pub async fn get_log_offset(&self) -> usize {
         let mmap = self.metadata.read().await;
         let meta = DatabaseMetadata::ref_from_bytes(&mmap[..]).unwrap();
 
         meta.log_offset
     }
 
-    pub async fn set_log_offset(&self, offset: u64) {
+    pub async fn set_log_offset(&self, offset: usize) {
         let mut mmap = self.metadata.write().await;
         let meta = DatabaseMetadata::mut_from_bytes(&mut mmap[..]).unwrap();
 

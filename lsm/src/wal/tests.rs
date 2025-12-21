@@ -39,7 +39,7 @@ async fn test_cleanup(tempdir: TempDir, wal: WriteAheadLog) {
 }
 
 #[cfg(feature = "wisckey")]
-async fn reopen_wal(params: Arc<Params>, offset: u64) -> (Memtable, WriteAheadLog) {
+async fn reopen_wal(params: Arc<Params>, offset: usize) -> (Memtable, WriteAheadLog) {
     let mut memtable = Memtable::new(0);
 
     let manifest = Arc::new(Manifest::new(params.clone()).await);
@@ -52,7 +52,7 @@ async fn reopen_wal(params: Arc<Params>, offset: u64) -> (Memtable, WriteAheadLo
 }
 
 #[cfg(not(feature = "wisckey"))]
-async fn reopen_wal(params: Arc<Params>, offset: u64) -> (Memtable, WriteAheadLog) {
+async fn reopen_wal(params: Arc<Params>, offset: usize) -> (Memtable, WriteAheadLog) {
     let mut memtable = Memtable::new(0);
 
     let (wal, _) = WriteAheadLog::open(params, offset, &mut memtable)
@@ -181,7 +181,7 @@ async fn reopen_with_offset_and_cleanup1() {
     wal.sync().await.unwrap();
 
     let offset = 22;
-    wal.set_offset(offset).await;
+    wal.prune_wal(offset).await;
     drop(wal);
 
     let (memtable, wal) = reopen_wal(params, offset).await;
@@ -217,7 +217,7 @@ async fn reopen_with_offset_and_cleanup2() {
     wal.sync().await.unwrap();
 
     let offset = 8212;
-    wal.set_offset(offset).await;
+    wal.prune_wal(offset).await;
 
     drop(wal);
 

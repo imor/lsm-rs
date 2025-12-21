@@ -78,7 +78,7 @@ const PAGE_SIZE: usize = 4 * 1024;
 /// Invariants:
 ///  - sync_pos <= write_pos <= queue_pos
 ///  - prune_pos <= can_prune_pos
-/// 
+///
 struct LogStatus {
     /// Absolute count of queued write operations
     queue_pos: usize,
@@ -168,14 +168,12 @@ impl WriteAheadLog {
     #[cfg(feature = "wisckey")]
     pub async fn open(
         params: Arc<Params>,
-        start_position: u64,
+        start_position: usize,
         memtable: &mut Memtable,
         value_index: &mut ValueIndex,
     ) -> Result<(Self, RecoveryResult), Error> {
         // This reads the file(s) in the current thread
         // because we cannot send it between threads easily
-
-        let start_position = start_position as usize;
 
         let mut reader = WalReader::new(params.db_path.clone(), start_position).await?;
 
@@ -198,13 +196,11 @@ impl WriteAheadLog {
     #[cfg(not(feature = "wisckey"))]
     pub async fn open(
         params: Arc<Params>,
-        start_position: u64,
+        start_position: usize,
         memtable: &mut Memtable,
     ) -> Result<(Self, RecoveryResult), Error> {
         // This reads the file(s) in the current thread
         // because we cannot send stuff between threads easily
-
-        let start_position = start_position as usize;
 
         let mut reader = WalReader::new(params.db_path.clone(), start_position).await?;
 
@@ -252,7 +248,7 @@ impl WriteAheadLog {
     /// Stores an operation and returns the new position in
     /// the logfile
     #[tracing::instrument(skip(self, entries))]
-    pub async fn store(&self, entries: impl Iterator<Item = LogEntry<'_>>) -> Result<u64, Error> {
+    pub async fn store(&self, entries: impl Iterator<Item = LogEntry<'_>>) -> Result<usize, Error> {
         let mut writes = vec![];
 
         for entry in entries {
@@ -292,7 +288,7 @@ impl WriteAheadLog {
         let end_pos = self.queue_write(writes).await;
         self.wait_for_write_position(end_pos).await;
 
-        Ok(end_pos as u64)
+        Ok(end_pos)
     }
 
     async fn queue_write(&self, writes: Vec<Vec<u8>>) -> usize {
@@ -311,19 +307,50 @@ impl WriteAheadLog {
     }
 
     async fn wait_for_write_position(&self, position: usize) {
+        self.wait_for_condition(position, |status: &LogStatus, position: usize| -> bool {
+            status.write_pos >= position
+        })
+        .await
+    }
+
+    async fn wait_for_sync_pos(&self, position: usize) {
+        self.wait_for_condition(position, |status: &LogStatus, position: usize| -> bool {
+            status.sync_pos > position
+        })
+        .await
+    }
+
+    async fn wait_for_prune_pos(&self, position: usize) {
+        self.wait_for_condition(position, |status: &LogStatus, position: usize| -> bool {
+            status.prune_pos >= position
+        })
+        .await
+    }
+
+    async fn wait_for_condition<F: Fn(&LogStatus, usize) -> bool>(
+        &self,
+        position: usize,
+        predicate: F,
+    ) {
         loop {
+            // This works around the following bug:
+            // https://github.com/rust-lang/rust/issues/63768
             let fut = self.inner.write_cond.notified();
             tokio::pin!(fut);
 
             {
                 let status = self.inner.status.read();
-                if status.write_pos >= position {
+                if predicate(&status, position) {
                     return;
                 }
+                // if status.prune_pos >= position {
+                //     return;
+                // }
 
                 // Wait for next write
                 fut.as_mut().enable();
             }
+
             fut.await;
         }
     }
@@ -352,72 +379,43 @@ impl WriteAheadLog {
     #[tracing::instrument(skip(self))]
     pub async fn sync(&self) -> Result<(), Error> {
         let last_pos = {
-            let mut lock = self.inner.status.write();
+            let mut status = self.inner.status.write();
 
             // Nothing to sync?
-            if lock.sync_pos == lock.write_pos {
+            if status.sync_pos == status.write_pos {
                 return Ok(());
             }
 
-            assert!(lock.sync_pos < lock.write_pos);
+            assert!(status.sync_pos < status.write_pos);
 
-            lock.sync_requested = true;
+            status.sync_requested = true;
             self.inner.queue_cond.notify_waiters();
 
-            lock.sync_pos
+            status.sync_pos
         };
 
-        loop {
-            let fut = self.inner.write_cond.notified();
-            tokio::pin!(fut);
+        self.wait_for_sync_pos(last_pos).await;
 
-            {
-                let lock = self.inner.status.read();
-
-                if lock.sync_pos > last_pos {
-                    return Ok(());
-                }
-
-                fut.as_mut().enable();
-            }
-            fut.await;
-        }
+        Ok(())
     }
 
-    /// Once the memtable has been flushed we can remove old log entries
+    /// Once the memtable has been flushed we can prune old log entries
     #[tracing::instrument(skip(self))]
-    pub async fn set_offset(&self, new_offset: u64) {
-        let new_offset = new_offset as usize;
-
+    pub async fn prune_wal(&self, prune_pos: usize) {
         {
-            let mut lock = self.inner.status.write();
+            let mut status = self.inner.status.write();
 
-            if new_offset <= lock.can_prune_pos {
+            if prune_pos <= status.can_prune_pos {
                 panic!(
-                    "Offset can only be increased! Requested {new_offset}, but was {}",
-                    lock.can_prune_pos
+                    "Offset can only be increased! Requested {prune_pos}, but was {}",
+                    status.can_prune_pos
                 );
             }
 
-            lock.can_prune_pos = new_offset;
+            status.can_prune_pos = prune_pos;
             self.inner.queue_cond.notify_waiters();
         }
 
-        loop {
-            // This works around the following bug:
-            // https://github.com/rust-lang/rust/issues/63768
-            let fut = self.inner.write_cond.notified();
-            tokio::pin!(fut);
-
-            {
-                let lock = self.inner.status.read();
-                if lock.prune_pos >= new_offset {
-                    return;
-                }
-                fut.as_mut().enable();
-            }
-
-            fut.await;
-        }
+        self.wait_for_prune_pos(prune_pos).await;
     }
 }

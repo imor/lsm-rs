@@ -65,7 +65,7 @@ pub struct DbLogic {
     params: Arc<Params>,
     memtable: RwLock<MemtableRef>,
     /// Immutable memtables are about to be compacted
-    imm_memtables: RwLock<VecDeque<(u64, ImmMemtableRef)>>,
+    imm_memtables: RwLock<VecDeque<(usize, ImmMemtableRef)>>,
     imm_cond: Condvar,
     levels: Vec<Level>,
     wal: Arc<WriteAheadLog>,
@@ -530,7 +530,7 @@ impl DbLogic {
                 .update_table_set(vec![(0, table_id)], vec![])
                 .await;
 
-            self.wal.set_offset(log_offset).await;
+            self.wal.prune_wal(log_offset).await;
             self.manifest.set_log_offset(log_offset).await;
 
             // Finally, remove immutable memtable
