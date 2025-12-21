@@ -413,30 +413,32 @@ impl DbLogic {
     #[tracing::instrument(skip(self, write_batch, opt))]
     pub async fn write_opts(
         &self,
-        mut write_batch: WriteBatch,
+        write_batch: WriteBatch,
         opt: &WriteOptions,
     ) -> Result<bool, Error> {
         let mut memtable = self.memtable.write().await;
         let mem_inner = memtable.get_mut();
 
+        // Write the batch to the WAL first
         let wal_offset = {
             let writes = write_batch.writes.iter().map(LogEntry::Write);
 
-            let log_pos = self.wal.store(writes).await?;
+            let write_pos = self.wal.store(writes).await?;
 
             if opt.sync {
                 self.wal.sync().await?;
             }
 
-            for op in write_batch.writes.drain(..) {
-                match op {
-                    WriteOp::Put(key, value) => mem_inner.put(key, value),
-                    WriteOp::Delete(key) => mem_inner.delete(key),
-                }
-            }
-
-            log_pos
+            write_pos
         };
+
+        // Now apply the writes to the memtable
+        for op in write_batch.writes {
+            match op {
+                WriteOp::Put(key, value) => mem_inner.put(key, value),
+                WriteOp::Delete(key) => mem_inner.delete(key),
+            }
+        }
 
         // If the current memtable is full, mark it as immutable, so it can be flushed to L0
         if mem_inner.is_full(&self.params) {
@@ -444,6 +446,27 @@ impl DbLogic {
             let imm = memtable.take(next_seq_num);
             let mut imm_mems = self.imm_memtables.write().await;
 
+            // The following while loop implements backpressure to prevent unbounded memory growth.
+            //
+            // What it does:
+            // The loop waits until the imm_memtables (immutable memtables) queue is empty before allowing the current memtable to become immutable.
+            //
+            // How it works:
+            // 1. Check if queue is full: If imm_memtables already contains memtables waiting to be flushed to disk
+            // 2. Wait for space: Calls rw_write_wait() which:
+            // * Releases the write lock on imm_memtables
+            // * Waits on the condition variable imm_cond
+            // *Re-acquires the write lock when notified
+            // 3.Retry: Loops until the queue is empty
+            //
+            // Why it's needed:
+            // Prevents the database from accepting writes faster than it can flush them to disk
+            // Without this, you could accumulate many immutable memtables in memory, leading to OOM
+            // The condition variable is notified in do_memtable_compaction() after a memtable is successfully flushed:
+            //
+            // self.imm_cond.notify_all();
+            //
+            // This creates a natural throttling mechanism where write operations block when the system can't keep up with compaction.
             while !imm_mems.is_empty() {
                 imm_mems = self
                     .imm_cond
