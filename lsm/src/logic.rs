@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockWriteGuard};
 use tokio_condvar::Condvar;
 
 use cfg_if::cfg_if;
@@ -16,7 +16,7 @@ use crate::memtable::{
 };
 use crate::sorted_table::{InternalIterator, TableId, TableIterator};
 use crate::wal::{LogEntry, WriteAheadLog};
-use crate::{Error, Key, Params, StartMode, WriteBatch, WriteOp, WriteOptions};
+use crate::{Error, Key, Params, StartMode, WriteBatch, WriteOptions};
 
 #[cfg(feature = "wisckey")]
 use crate::values::{ValueIndex, ValueLog, ValueRef};
@@ -417,30 +417,45 @@ impl DbLogic {
         opt: &WriteOptions,
     ) -> Result<bool, Error> {
         let mut memtable = self.memtable.write().await;
-        let mem_inner = memtable.get_mut();
 
         // Write the batch to the WAL first
-        let wal_offset = {
-            let writes = write_batch.writes.iter().map(LogEntry::Write);
-
-            let write_pos = self.wal.store(writes).await?;
-
-            if opt.sync {
-                self.wal.sync().await?;
-            }
-
-            write_pos
-        };
+        let wal_offset = self.write_batch_to_wal(&write_batch, opt).await?;
 
         // Now apply the writes to the memtable
-        for op in write_batch.writes {
-            match op {
-                WriteOp::Put(key, value) => mem_inner.put(key, value),
-                WriteOp::Delete(key) => mem_inner.delete(key),
+        {
+            let mem_inner = memtable.get_mut();
+            for op in write_batch.writes {
+                op.write_to_memtable(mem_inner);
             }
         }
 
         // If the current memtable is full, mark it as immutable, so it can be flushed to L0
+        self.try_freeze_memtable(memtable, wal_offset).await
+    }
+
+    async fn write_batch_to_wal(
+        &self,
+        write_batch: &WriteBatch,
+        opt: &WriteOptions,
+    ) -> Result<usize, Error> {
+        let writes = write_batch.writes.iter().map(LogEntry::Write);
+
+        let write_pos = self.wal.store(writes).await?;
+
+        if opt.sync {
+            self.wal.sync().await?;
+        }
+
+        Ok(write_pos)
+    }
+
+    async fn try_freeze_memtable(
+        &self,
+        mut memtable: RwLockWriteGuard<'_, MemtableRef>,
+        wal_offset: usize,
+    ) -> Result<bool, Error> {
+        // If the current memtable is full, mark it as immutable, so it can be flushed to L0
+        let mem_inner = memtable.get_mut();
         if mem_inner.is_full(&self.params) {
             let next_seq_num = mem_inner.get_next_seq_number();
             let imm = memtable.take(next_seq_num);

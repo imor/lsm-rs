@@ -1,4 +1,4 @@
-use crate::{Key, Value};
+use crate::{Key, Value, memtable::Memtable};
 
 #[derive(Debug)]
 pub enum WriteOp {
@@ -20,15 +20,15 @@ impl WriteOp {
 
     pub fn get_key(&self) -> &[u8] {
         match self {
-            Self::Put(key, _) => key,
-            Self::Delete(key) => key,
+            WriteOp::Put(key, _) => key,
+            WriteOp::Delete(key) => key,
         }
     }
 
     pub fn get_type(&self) -> u8 {
         match self {
-            Self::Put(_, _) => Self::PUT_OP,
-            Self::Delete(_) => Self::DELETE_OP,
+            WriteOp::Put(_, _) => WriteOp::PUT_OP,
+            WriteOp::Delete(_) => WriteOp::DELETE_OP,
         }
     }
 
@@ -39,8 +39,19 @@ impl WriteOp {
     #[allow(dead_code)]
     pub(crate) fn get_value_length(&self) -> u64 {
         match self {
-            Self::Put(_, value) => value.len() as u64,
-            Self::Delete(_) => 0u64,
+            WriteOp::Put(_, value) => value.len() as u64,
+            WriteOp::Delete(_) => 0u64,
+        }
+    }
+
+    pub(crate) fn write_to_memtable(self, memtable: &mut Memtable) {
+        match self {
+            WriteOp::Put(key, value) => {
+                memtable.put(key, value);
+            }
+            WriteOp::Delete(key) => {
+                memtable.delete(key);
+            }
         }
     }
 }
