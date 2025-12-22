@@ -9,6 +9,8 @@ use lru::LruCache;
 
 use zerocopy::FromBytes;
 
+#[cfg(feature = "wisckey")]
+use crate::EntryRef;
 #[cfg(not(feature = "wisckey"))]
 use crate::EntryRef;
 use crate::Params;
@@ -24,7 +26,7 @@ pub use block::DataBlock;
 use block::EntryHeader;
 
 #[cfg(feature = "wisckey")]
-use crate::values::ValueId;
+use crate::values::{ValueId, ValueLog};
 
 pub type DataBlockId = u64;
 
@@ -134,6 +136,24 @@ impl DataEntry {
         match self.get_type() {
             DataEntryType::Put => {
                 let entry = EntryRef::SortedTable { entry: self };
+                Some(entry)
+            }
+            DataEntryType::Delete => None,
+        }
+    }
+
+    #[cfg(feature = "wisckey")]
+    pub async fn get_entry_ref(self, value_log: &ValueLog) -> Option<EntryRef> {
+        match self.get_type() {
+            DataEntryType::Put => {
+                let value_ref = value_log
+                    .get_ref(self.get_value_id().unwrap())
+                    .await
+                    .unwrap();
+                let entry = EntryRef::SortedTable {
+                    entry: self,
+                    value_ref,
+                };
                 Some(entry)
             }
             DataEntryType::Delete => None,

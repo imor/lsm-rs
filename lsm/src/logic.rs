@@ -301,41 +301,28 @@ impl DbLogic {
     #[cfg(feature = "wisckey")]
     #[tracing::instrument(skip(self, key))]
     pub async fn get(&self, key: &[u8]) -> Result<(bool, Option<EntryRef>), Error> {
-        let mut compaction_triggered = false;
-
+        // First look in memtable
         {
             let memtable = self.memtable.read().await;
 
             if let Some(entry) = memtable.get().get(key) {
-                match entry.get_type() {
-                    DataEntryType::Put => {
-                        let entry = EntryRef::Memtable { entry };
-                        return Ok((compaction_triggered, Some(entry)));
-                    }
-                    DataEntryType::Delete => {
-                        return Ok((compaction_triggered, None));
-                    }
-                }
+                return Ok((false, entry.get_entry_ref()));
             }
         }
 
+        // Next check in immutable memtables
         {
             let imm_mems = self.imm_memtables.read().await;
 
             for (_, imm) in imm_mems.iter().rev() {
                 if let Some(entry) = imm.get().get(key) {
-                    match entry.get_type() {
-                        DataEntryType::Put => {
-                            let entry = EntryRef::Memtable { entry };
-                            return Ok((compaction_triggered, Some(entry)));
-                        }
-                        DataEntryType::Delete => {
-                            return Ok((compaction_triggered, None));
-                        }
-                    }
+                    return Ok((false, entry.get_entry_ref()));
                 }
             }
         }
+
+        // Finally check in levels
+        let mut compaction_triggered = false;
 
         for level in self.levels.iter() {
             let (level_compact_triggered, result) = level.get(key).await;
@@ -344,20 +331,10 @@ impl DbLogic {
             }
 
             if let Some(entry) = result {
-                match entry.get_type() {
-                    DataEntryType::Put => {
-                        let value_ref = self
-                            .value_log
-                            .get_ref(entry.get_value_id().unwrap())
-                            .await
-                            .unwrap();
-                        let entry = EntryRef::SortedTable { entry, value_ref };
-                        return Ok((compaction_triggered, Some(entry)));
-                    }
-                    DataEntryType::Delete => {
-                        return Ok((compaction_triggered, None));
-                    }
-                }
+                return Ok((
+                    compaction_triggered,
+                    entry.get_entry_ref(&self.value_log).await,
+                ));
             }
         }
 
@@ -522,7 +499,7 @@ impl DbLogic {
                 if #[cfg(feature="wisckey")] {
                     let mut vbuilder = self.value_log.make_batch().await;
 
-                    for (key, mem_entry) in memtable_entries.into_iter() {
+                    for (key, mem_entry) in memtable_entries {
                         match mem_entry {
                             MemtableEntry::Value{seq_number, value} => {
                                 let value_ref = vbuilder.add_entry(&key, &value).await;
@@ -536,7 +513,7 @@ impl DbLogic {
 
                     vbuilder.finish().await?;
                 } else {
-                    for (key, mem_entry) in memtable_entries.into_iter() {
+                    for (key, mem_entry) in memtable_entries {
                         match mem_entry {
                             MemtableEntry::Value{seq_number, value} => {
                                 table_builder.add_value(&key, seq_number, &value).await?;
