@@ -223,7 +223,7 @@ impl Level {
 
         // Try to set the compaction flag
         // otherwise, we abort (due to concurrency)
-        if !table.maybe_start_compaction() {
+        if !table.start_compaction() {
             return Err(());
         }
 
@@ -253,7 +253,7 @@ impl Level {
                     }
 
                     if table.overlaps(&min, &max) {
-                        if table.maybe_start_compaction() {
+                        if table.start_compaction() {
                             min = std::cmp::min(&min[..], table.get_min()).to_vec();
                             max = std::cmp::max(&max[..], table.get_max()).to_vec();
 
@@ -264,7 +264,7 @@ impl Level {
                         } else {
                             // Lock contention!
                             for table in tables {
-                                table.abort_compaction();
+                                table.stop_compaction();
                             }
                             return Err(());
                         }
@@ -302,10 +302,10 @@ impl Level {
 
         for table in tables.iter() {
             if table.overlaps(min, max) {
-                if !table.maybe_start_compaction() {
+                if !table.start_compaction() {
                     // Abort
                     for table in tables_to_compact.into_iter() {
-                        table.abort_compaction();
+                        table.stop_compaction();
                     }
                     return None;
                 }
@@ -322,7 +322,7 @@ impl Level {
         for placeholder in placeholders.iter() {
             if placeholder.overlaps(min, max) {
                 for table in tables_to_compact {
-                    table.abort_compaction();
+                    table.stop_compaction();
                 }
                 return None;
             }

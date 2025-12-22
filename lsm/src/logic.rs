@@ -648,7 +648,7 @@ impl DbLogic {
             None => {
                 log::trace!("Aborting compaction due to concurrency");
                 for parent_table in parent_tbls_to_compact {
-                    parent_table.abort_compaction();
+                    parent_table.stop_compaction();
                 }
                 return Ok(CompactResult::NothingToDo);
             }
@@ -922,7 +922,7 @@ impl DbLogic {
         }
 
         // Unlock table
-        table.finish_fast_compaction();
+        table.stop_compaction();
 
         log::trace!("Done moving table #{table_id}");
     }
@@ -1214,7 +1214,7 @@ mod tests {
             let table = table_builder.finish().await.unwrap();
             let table_id = table.get_id();
 
-            let could_set_flag = table.maybe_start_compaction();
+            let could_set_flag = table.start_compaction();
             assert!(could_set_flag);
 
             l0.add_l0_table(table).await;

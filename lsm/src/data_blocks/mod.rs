@@ -28,6 +28,7 @@ use block::EntryHeader;
 #[cfg(feature = "wisckey")]
 use crate::values::{ValueId, ValueLog};
 
+/// The unique identifier of a data block
 pub type DataBlockId = u64;
 
 /// The minimum valid data block identifier
@@ -35,6 +36,15 @@ pub const MIN_DATA_BLOCK_ID: DataBlockId = 1;
 
 const NUM_SHARDS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 
+/// The prefix length optimization is a key compression technique to reduce storage space in LSM trees.
+/// Instead of storing complete keys repeatedly, the data block stores only the different suffix of each key,
+/// along with how much of the previous key's prefix can be reused.
+///
+/// For example:
+///
+/// Key 1: "user_12345"
+/// Key 2: "user_12346" → Store prefix_len=9, suffix="6" instead of full key
+/// Key 3: "user_99999" → Store prefix_len=5, suffix="99999"
 #[derive(Debug)]
 pub struct PrefixedKey {
     prefix_len: u32,
@@ -57,16 +67,17 @@ pub enum DataEntryType {
     Delete,
 }
 
+/// A data entry in a data block
 #[derive(Clone)]
 pub struct DataEntry {
-    /// The block containing th
+    /// The block containing the entry
     block: Arc<DataBlock>,
 
-    /// The of this entry in the block's buffer
+    /// The offset of this entry in the block's buffer
     offset: usize,
 
-    /// The end of this entry
-    next_offset: u32,
+    /// The length of this entry
+    len: u32,
 }
 
 enum SearchResult {
@@ -85,9 +96,8 @@ impl DataEntry {
         self.get_header().seq_number
     }
 
-    /// The offset of the next entry
-    pub fn get_next_offset(&self) -> u32 {
-        self.next_offset
+    pub fn len(&self) -> u32 {
+        self.len
     }
 
     pub fn get_type(&self) -> DataEntryType {
@@ -176,7 +186,7 @@ impl DataBlocks {
         let shard_size = NonZeroUsize::new(max_data_files.get() / NUM_SHARDS)
             .expect("Not enough open files to support the number of shards");
 
-        let mut block_caches = Vec::new();
+        let mut block_caches = Vec::with_capacity(NUM_SHARDS.get());
         for _ in 0..NUM_SHARDS.get() {
             block_caches.push(Mutex::new(BlockShard::new(shard_size)));
         }
@@ -219,10 +229,10 @@ impl DataBlocks {
 
         // Do not hold the lock while loading form disk for better concurrency
         // Worst case this means we load the same block multiple times...
-        let fpath = self.get_file_path(id);
-        log::trace!("Loading data block from disk at {fpath:?}");
-        let data = disk::read(&fpath, 0).await.unwrap_or_else(|err| {
-            panic!("Failed to load data block from disk at {fpath:?}: {err}")
+        let file_path = self.get_file_path(id);
+        log::trace!("Loading data block from disk at {file_path:?}");
+        let data = disk::read(&file_path, 0).await.unwrap_or_else(|err| {
+            panic!("Failed to load data block from disk at {file_path:?}: {err}")
         });
         let block = Arc::new(DataBlock::new_from_data(
             data,
@@ -285,12 +295,11 @@ mod tests {
         assert_eq!(key, vec![5]);
         assert_eq!(entry.get_value_id(), Some(val1));
 
-        let (key, entry) =
-            DataBlock::get_entry_at_offset(data_block2.clone(), entry.get_next_offset(), &key);
+        let (key, entry) = DataBlock::get_entry_at_offset(data_block2.clone(), entry.len(), &key);
 
         assert_eq!(key, vec![5, 2]);
         assert_eq!(entry.get_value_id(), Some(val2));
-        assert_eq!(entry.get_next_offset(), data_block2.byte_len());
+        assert_eq!(entry.len(), data_block2.byte_len());
     }
 
     #[cfg(not(feature = "wisckey"))]
@@ -336,11 +345,10 @@ mod tests {
         assert_eq!(key, vec![5]);
         assert_eq!(entry.get_value(), Some(&val1[..]));
 
-        let (key, entry) =
-            DataBlock::get_entry_at_offset(data_block2.clone(), entry.get_next_offset(), &key);
+        let (key, entry) = DataBlock::get_entry_at_offset(data_block2.clone(), entry.len(), &key);
 
         assert_eq!(key, vec![5, 2]);
         assert_eq!(entry.get_value(), Some(&val2[..]));
-        assert_eq!(entry.get_next_offset(), data_block2.byte_len());
+        assert_eq!(entry.len(), data_block2.byte_len());
     }
 }

@@ -185,9 +185,9 @@ impl<'a> TableBuilder<'a> {
 
         Ok(SortedTable {
             index,
-            allowed_seeks: AtomicI32::new(allowed_seeks),
+            num_seeks_compaction_threshold: AtomicI32::new(allowed_seeks),
             identifier: self.identifier,
-            compaction_flag: AtomicBool::new(false),
+            being_compacted: AtomicBool::new(false),
             data_blocks: self.data_blocks,
         })
     }

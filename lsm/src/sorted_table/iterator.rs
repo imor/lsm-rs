@@ -83,7 +83,7 @@ impl TableIterator {
             let byte_len = first_block.byte_len();
             let (key, entry) = DataBlock::get_entry_at_offset(first_block, 0, &last_key);
 
-            let next_offset = entry.get_next_offset();
+            let next_offset = entry.len();
 
             // Are we already at the end of the first block?
             let (block_pos, block_offset) = if byte_len == next_offset {
@@ -206,7 +206,7 @@ impl InternalIterator for TableIterator {
                     let (key, entry) =
                         DataBlock::get_entry_at_offset(block, self.block_offset, &self.key);
 
-                    let next_offset = entry.get_next_offset();
+                    let next_offset = entry.len();
 
                     self.key = key;
                     self.entry = entry;

@@ -159,7 +159,7 @@ impl DataBlock {
         let entry = DataEntry {
             block: self_ptr,
             offset: entry_offset,
-            next_offset: next_offset as u32,
+            len: next_offset as u32,
         };
 
         (kdata, entry)
@@ -183,8 +183,7 @@ impl DataBlock {
         let mut current_idx = restart_pos * self_ptr.restart_interval;
 
         while current_idx < index {
-            (key, entry) =
-                Self::get_entry_at_offset(self_ptr.clone(), entry.get_next_offset(), &key);
+            (key, entry) = Self::get_entry_at_offset(self_ptr.clone(), entry.len(), &key);
             current_idx += 1;
         }
 
@@ -285,7 +284,7 @@ impl DataBlock {
                 return Some(entry);
             }
 
-            pos = entry.get_next_offset();
+            pos = entry.len();
             last_key = this_key;
         }
 
