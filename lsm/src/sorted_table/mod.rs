@@ -1,3 +1,31 @@
+//! Sorted tables (SSTables) for LSM-tree storage.
+//!
+//! This module implements sorted tables, which are immutable, on-disk data structures that
+//! store key-value entries in sorted order. Sorted tables are the fundamental building blocks
+//! of LSM-tree levels.
+//!
+//! ## Architecture
+//!
+//! Each sorted table consists of:
+//! - **Data blocks**: Store the actual key-value entries with prefix compression
+//! - **Index block**: Maps key ranges to data block IDs for efficient lookups
+//! - **Metadata**: Min/max keys, size, and compaction state
+//!
+//! ## Level Organization
+//!
+//! - **Level 0**: Tables may overlap (created from memtable flushes)
+//! - **Level 1+**: Tables are non-overlapping within each level
+//!
+//! ## Compaction
+//!
+//! Sorted tables support both size-based and seek-based compaction triggers:
+//! - Size-based: Triggered when a level exceeds its size threshold
+//! - Seek-based: Triggered when a table has been accessed too many times
+//!
+//! ## Immutability
+//!
+//! Once created, sorted tables are immutable. Updates create new tables during compaction.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering as AtomicOrdering};
 
@@ -14,27 +42,63 @@ pub use builder::TableBuilder;
 #[cfg(test)]
 mod tests;
 
+/// Unique identifier for a sorted table.
 pub type TableId = u64;
 
-/// Entries in each level are grouped into sorted tables
-/// These tables contain an ordered set of key/value-pairs
+/// An immutable sorted table (SSTable) storing key-value entries on disk.
 ///
-/// Except for level 0, sorted tables do not overlap others on the same level
+/// Sorted tables are the fundamental storage units in LSM-trees. Each table contains an
+/// ordered collection of key-value entries organized into data blocks, with an index block
+/// for efficient lookups.
+///
+/// ## Overlap Constraints
+///
+/// - **Level 0**: Tables may have overlapping key ranges (created from memtable flushes)
+/// - **Level 1+**: Tables within a level have non-overlapping key ranges
+///
+/// ## Compaction
+///
+/// Tables track access counts to support seek-based compaction, which moves frequently
+/// accessed tables to lower levels to improve read performance.
+///
+/// ## Thread Safety
+///
+/// The `being_compacted` flag uses atomic operations to ensure only one compaction task
+/// processes this table at a time.
 pub struct SortedTable {
-    /// The unique identifier of this table
+    /// Unique identifier for this table.
     identifier: TableId,
-    /// The index of the table; it holds all relevant metadata
+    
+    /// Index block containing metadata (min/max keys, size) and block index for lookups.
     index: IndexBlock,
-    /// The data blocks of this table
+    
+    /// Manager for loading and caching this table's data blocks.
     data_blocks: Arc<DataBlocks>,
-    /// Is this table currently being compacted
+    
+    /// Atomic flag indicating if this table is currently being compacted.
     being_compacted: AtomicBool,
-    /// The number of seek operations on this table before compaction is triggered
-    /// This improves read performance for heavily queried keys
+    
+    /// Remaining seeks before compaction is triggered. Decrements on each `get()` call.
+    /// Only used when `seek_based_compaction` is enabled. When <= 0, compaction should
+    /// be triggered to improve read performance.
     num_seeks_compaction_threshold: AtomicI32,
 }
 
 impl SortedTable {
+    /// Loads an existing sorted table from disk.
+    ///
+    /// Reads the index block to retrieve table metadata and initializes the compaction
+    /// threshold based on table size if seek-based compaction is enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `identifier` - The unique ID of the table to load
+    /// * `data_blocks` - Manager for data block operations
+    /// * `params` - Database configuration parameters
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index block cannot be loaded from disk.
     pub async fn load(
         identifier: TableId,
         data_blocks: Arc<DataBlocks>,
@@ -57,15 +121,25 @@ impl SortedTable {
         })
     }
 
-    /// Checks if seek-based compaction should be triggered for this table
+    /// Returns `true` if this table has reached its seek threshold and should be compacted.
+    ///
+    /// The threshold is based on table size and decrements with each `get()` call. When
+    /// the count reaches zero or below, the table should be compacted to improve read
+    /// performance. Only meaningful when `seek_based_compaction` is enabled.
     pub fn has_maximum_seeks(&self) -> bool {
         self.num_seeks_compaction_threshold
             .load(AtomicOrdering::SeqCst)
             <= 0
     }
 
-    /// Tries to atomically mark this table as being compacted and
-    /// returns false if another task is already compacting this table
+    /// Attempts to mark this table as being compacted.
+    ///
+    /// Uses atomic compare-exchange to ensure only one task can compact this table at a time.
+    ///
+    /// # Returns
+    ///
+    /// * `true` - If the table was successfully marked for compaction
+    /// * `false` - If another task is already compacting this table
     pub fn start_compaction(&self) -> bool {
         let order = AtomicOrdering::SeqCst;
         let result = self
@@ -75,34 +149,58 @@ impl SortedTable {
         result.is_ok()
     }
 
-    /// Compaction has failed, e.g., due to lock contention
-    /// Remove the compaction flag
+    /// Clears the compaction flag after a failed compaction attempt.
+    ///
+    /// Should be called when compaction fails (e.g., due to lock contention) to allow
+    /// future compaction attempts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compaction flag was not set, indicating a programming error.
     pub fn stop_compaction(&self) {
         let prev = self.being_compacted.swap(false, AtomicOrdering::SeqCst);
         assert!(prev, "Compaction flag was not set!");
     }
 
+    /// Returns the unique identifier of this table.
     pub fn get_id(&self) -> TableId {
         self.identifier
     }
 
-    /// Get the size of this table (in bytes)
+    /// Returns the total size of this table in bytes.
+    ///
+    /// This includes all data blocks but not the index block overhead.
     pub fn get_size(&self) -> usize {
         self.index.get_size()
     }
 
-    /// Get the minimum key of this table
+    /// Returns the smallest key in this table.
+    ///
+    /// This is the minimum key across all entries in all data blocks.
     pub fn get_min(&self) -> &[u8] {
         self.index.get_min()
     }
 
-    /// Get the maximum key of this table
+    /// Returns the largest key in this table.
+    ///
+    /// This is the maximum key across all entries in all data blocks.
     pub fn get_max(&self) -> &[u8] {
         self.index.get_max()
     }
 
-    /// Gets an entry for particular key in this table
-    /// Returns None if no entry for the key exists
+    /// Retrieves the entry for the specified key from this table.
+    ///
+    /// Uses the index block to identify the relevant data block via binary search,
+    /// then searches within that block. Decrements the seek counter for compaction tracking.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to search for
+    ///
+    /// # Returns
+    ///
+    /// * `Some(DataEntry)` - If the key exists in this table
+    /// * `None` - If the key is not found or is outside this table's key range
     #[tracing::instrument(skip(self, key))]
     pub async fn get(&self, key: &[u8]) -> Option<DataEntry> {
         self.num_seeks_compaction_threshold
@@ -114,9 +212,19 @@ impl SortedTable {
         DataBlock::get_by_key(&block, key)
     }
 
-    /// Check if this table overlaps with the specified range
+    /// Checks if this table's key range overlaps with the specified range.
     ///
-    /// min and max are both inclusive
+    /// Used during compaction to determine which tables need to be merged. An overlap
+    /// occurs if any part of the table's key range intersects with the query range.
+    ///
+    /// # Arguments
+    ///
+    /// * `min` - Minimum key of the query range (inclusive)
+    /// * `max` - Maximum key of the query range (inclusive)
+    ///
+    /// # Returns
+    ///
+    /// `true` if this table contains any keys in the range `[min, max]`, `false` otherwise.
     #[inline(always)]
     pub fn overlaps(&self, min: &[u8], max: &[u8]) -> bool {
         self.get_max() >= min && self.get_min() <= max
