@@ -1,3 +1,55 @@
+//! Core database logic and state management.
+//!
+//! This module implements `DbLogic`, the central coordinator for all LSM-tree operations.
+//! It manages:
+//! - **Memtables**: Active and immutable memtables with write coordination
+//! - **Levels**: Hierarchical organization of sorted tables
+//! - **Compaction**: Memtable flushes and level-to-level compaction
+//! - **Reads**: Lock-free multi-version reads across memtables and levels
+//! - **Writes**: Write-ahead logging and memtable updates with backpressure
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────┐
+//! │  Memtable   │ ← Active writes
+//! └─────────────┘
+//!       ↓ (when full)
+//! ┌─────────────┐
+//! │ Imm Memtable│ ← Queue for flushing
+//! └─────────────┘
+//!       ↓ (flush to disk)
+//! ┌─────────────┐
+//! │   Level 0   │ ← May have overlapping keys
+//! └─────────────┘
+//!       ↓ (compaction)
+//! ┌─────────────┐
+//! │   Level 1   │ ← Non-overlapping keys
+//! └─────────────┘
+//!       ↓
+//!      ...
+//! ```
+//!
+//! # Concurrency Model
+//!
+//! - **Lock-free reads**: Readers acquire shared locks on memtables/levels without blocking
+//! - **Write coordination**: Single-writer model for memtable with backpressure
+//! - **Compaction**: Background tasks with fine-grained table-level locks
+//!
+//! # Write Path
+//!
+//! 1. Append to Write-Ahead Log (WAL)
+//! 2. Insert into active memtable
+//! 3. If memtable full → freeze to immutable memtable
+//! 4. Background task flushes immutable memtable to L0
+//!
+//! # Read Path
+//!
+//! 1. Check active memtable
+//! 2. Check immutable memtables (newest to oldest)
+//! 3. Check levels L0 → L1 → L2... (newest to oldest)
+//! 4. Return first match or None
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -23,26 +75,43 @@ use crate::values::{ValueIndex, ValueLog, ValueRef};
 
 use crate::data_blocks::DataEntry;
 
+/// Result of a compaction attempt.
 #[derive(Debug, PartialEq, Eq)]
 enum CompactResult {
+    /// No compaction was needed.
     NothingToDo,
+    /// Compaction completed successfully.
     DidWork,
+    /// Compaction was needed but couldn't proceed due to lock contention.
     Locked,
 }
 
-/// Refers to an entry in the key-value store without copying it
+/// A reference to a key-value entry without copying its data.
+///
+/// Provides zero-copy access to values stored in either memtables or sorted tables.
+/// When WiscKey mode is enabled, sorted table entries store references to the value log.
 pub enum EntryRef {
+    /// Entry from a sorted table on disk.
     SortedTable {
+        /// The data entry containing key metadata.
         entry: DataEntry,
+        /// Reference to value in the value log (WiscKey mode only).
         #[cfg(feature = "wisckey")]
         value_ref: ValueRef,
     },
+    /// Entry from an in-memory memtable.
     Memtable {
+        /// Reference to the memtable entry.
         entry: MemtableEntryRef,
     },
 }
 
 impl EntryRef {
+    /// Returns the value associated with this entry.
+    ///
+    /// # Returns
+    ///
+    /// Byte slice containing the value data
     pub fn get_value(&self) -> &[u8] {
         match self {
             #[cfg(feature = "wisckey")]
@@ -54,28 +123,72 @@ impl EntryRef {
     }
 }
 
-/// The main database logic
+/// Core database state manager and operation coordinator.
 ///
-/// Generally, you will not interact with this directly but use
-/// Database instead.
-/// This is mainly kept public so that we can implement the sync
-/// API in a separate crate.
+/// `DbLogic` is the central component that manages all LSM-tree operations including
+/// reads, writes, and compaction. It coordinates between the active memtable, immutable
+/// memtables awaiting flush, and the hierarchical levels of sorted tables.
+///
+/// # Usage
+///
+/// This type is typically not used directly. Instead, use the `Database` wrapper which
+/// provides a higher-level API. `DbLogic` is public to enable the synchronous API
+/// implementation in the `lsm-sync` crate.
+///
+/// # Concurrency
+///
+/// - **Reads**: Lock-free with shared access to memtables and levels
+/// - **Writes**: Serialized through memtable write lock with backpressure
+/// - **Compaction**: Background tasks with table-level coordination
+///
+/// # Guarantees
+///
+/// - **Durability**: All writes are logged to WAL before returning
+/// - **Consistency**: Monotonic sequence numbers ensure correct ordering
+/// - **Isolation**: Readers see a consistent snapshot via MVCC
 pub struct DbLogic {
+    /// Manifest tracking table metadata and generating sequence numbers.
     manifest: Arc<Manifest>,
+    /// Database configuration parameters.
     params: Arc<Params>,
+    /// Currently active memtable receiving new writes.
     memtable: RwLock<MemtableRef>,
-    /// Immutable memtables are about to be compacted
+    /// Queue of immutable memtables waiting to be flushed to L0.
+    /// Each entry contains (WAL offset, memtable) for recovery coordination.
     imm_memtables: RwLock<VecDeque<(usize, ImmMemtableRef)>>,
+    /// Condition variable for backpressure when immutable queue is full.
     imm_cond: Condvar,
+    /// Hierarchical levels of sorted tables (L0, L1, L2, ...).
     levels: Vec<Level>,
+    /// Write-ahead log for durability.
     wal: Arc<WriteAheadLog>,
+    /// Optional logger for tracking level statistics.
     level_logger: Option<LevelLogger>,
 
+    /// Value log for storing large values separately (WiscKey mode).
     #[cfg(feature = "wisckey")]
     value_log: Arc<ValueLog>,
 }
 
 impl DbLogic {
+    /// Creates or opens a database instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_mode` - How to handle existing database:
+    ///   - `CreateOrOpen`: Open existing or create new
+    ///   - `Open`: Open existing (error if doesn't exist)
+    ///   - `CreateOrOverride`: Delete existing and create new
+    /// * `params` - Database configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// `Ok(DbLogic)` on success
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidParams`: Invalid configuration or database doesn't exist
+    /// - I/O errors during directory creation, manifest loading, or WAL recovery
     pub async fn new(start_mode: StartMode, params: Params) -> Result<Self, Error> {
         params.validate()?;
 
@@ -194,17 +307,34 @@ impl DbLogic {
         })
     }
 
+    /// Returns a reference to the value log (WiscKey mode only).
+    ///
+    /// # Returns
+    ///
+    /// Arc reference to the value log
     #[cfg(feature = "wisckey")]
     pub fn get_value_log(&self) -> Arc<ValueLog> {
         self.value_log.clone()
     }
 
-    /// Does the inital work to perform iteration across some range
+    /// Prepares iterators for range iteration across memtables and levels.
     ///
-    /// This will return the lists of memtable and sorted table iterators
-    /// and the minimum and maximum keys in this range
+    /// Creates iterators for all data sources (active memtable, immutable memtables,
+    /// and sorted tables) that overlap with the specified key range.
     ///
-    /// If reverse is true, the iterators will be set up for reverse iteration, otherwise forward iteration.
+    /// # Arguments
+    ///
+    /// * `min_key` - Optional minimum key (inclusive). `None` means start from beginning.
+    /// * `max_key` - Optional maximum key (inclusive). `None` means iterate to end.
+    /// * `reverse` - If `true`, set up for reverse iteration; otherwise forward.
+    ///
+    /// # Returns
+    ///
+    /// Tuple containing:
+    /// - Vector of memtable iterators
+    /// - Vector of sorted table iterators
+    /// - Owned minimum key (if specified)
+    /// - Owned maximum key (if specified)
     async fn prepare_iter_inner(
         &self,
         min_key: Option<&[u8]>,
@@ -270,7 +400,16 @@ impl DbLogic {
         )
     }
 
-    /// Iterate over the specified range in forward direction
+    /// Prepares iterators for forward iteration over the specified key range.
+    ///
+    /// # Arguments
+    ///
+    /// * `min_key` - Optional minimum key (inclusive)
+    /// * `max_key` - Optional maximum key (inclusive)
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (memtable iterators, table iterators, min key, max key)
     pub async fn prepare_iter(
         &self,
         min_key: Option<&[u8]>,
@@ -284,7 +423,16 @@ impl DbLogic {
         self.prepare_iter_inner(min_key, max_key, false).await
     }
 
-    /// Iterate over the specified range in reverse
+    /// Prepares iterators for reverse iteration over the specified key range.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_key` - Optional maximum key (inclusive)
+    /// * `min_key` - Optional minimum key (inclusive)
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (memtable iterators, table iterators, min key, max key)
     pub async fn prepare_reverse_iter(
         &self,
         max_key: Option<&[u8]>,
@@ -298,6 +446,25 @@ impl DbLogic {
         self.prepare_iter_inner(min_key, max_key, true).await
     }
 
+    /// Retrieves a value by key from the database (WiscKey mode).
+    ///
+    /// Searches in order: active memtable → immutable memtables → levels (L0 → Ln).
+    /// Returns the first matching entry found.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up
+    ///
+    /// # Returns
+    ///
+    /// - `Ok((compaction_triggered, Some(entry)))`: Value found
+    /// - `Ok((compaction_triggered, None))`: Value not found
+    ///
+    /// The boolean indicates whether seek-based compaction was triggered during this read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if value log lookup fails.
     #[cfg(feature = "wisckey")]
     #[tracing::instrument(skip(self, key))]
     pub async fn get(&self, key: &[u8]) -> Result<(bool, Option<EntryRef>), Error> {
@@ -342,6 +509,25 @@ impl DbLogic {
         Ok((compaction_triggered, None))
     }
 
+    /// Retrieves a value by key from the database.
+    ///
+    /// Searches in order: active memtable → immutable memtables → levels (L0 → Ln).
+    /// Returns the first matching entry found.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up
+    ///
+    /// # Returns
+    ///
+    /// - `Ok((compaction_triggered, Some(entry)))`: Value found
+    /// - `Ok((compaction_triggered, None))`: Value not found
+    ///
+    /// The boolean indicates whether seek-based compaction was triggered during this read.
+    ///
+    /// # Errors
+    ///
+    /// This version does not return errors.
     #[cfg(not(feature = "wisckey"))]
     #[tracing::instrument(skip(self, key))]
     pub async fn get(&self, key: &[u8]) -> Result<(bool, Option<EntryRef>), Error> {
@@ -382,11 +568,45 @@ impl DbLogic {
         Ok((compaction_triggered, None))
     }
 
+    /// Synchronizes the write-ahead log to disk.
+    ///
+    /// Ensures all buffered writes are persisted to durable storage.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the fsync operation fails.
     pub async fn synchronize(&self) -> Result<(), Error> {
         self.wal.sync().await?;
         Ok(())
     }
 
+    /// Applies a batch of writes to the database.
+    ///
+    /// Writes are first appended to the WAL, then applied to the active memtable.
+    /// If the memtable becomes full, it is frozen and queued for flushing to L0.
+    ///
+    /// # Arguments
+    ///
+    /// * `write_batch` - Batch of put/delete operations to apply
+    /// * `opt` - Write options (e.g., whether to sync WAL)
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)`: Write succeeded and memtable was frozen
+    /// - `Ok(false)`: Write succeeded without freezing memtable
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WAL append fails.
+    ///
+    /// # Backpressure
+    ///
+    /// This method blocks if the immutable memtable queue is full, providing
+    /// natural backpressure to prevent unbounded memory growth.
     #[tracing::instrument(skip(self, write_batch, opt))]
     pub async fn write_opts(
         &self,
@@ -410,6 +630,20 @@ impl DbLogic {
         self.try_freeze_memtable(memtable, wal_offset).await
     }
 
+    /// Appends a write batch to the write-ahead log.
+    ///
+    /// # Arguments
+    ///
+    /// * `write_batch` - Batch of operations to log
+    /// * `opt` - Options controlling sync behavior
+    ///
+    /// # Returns
+    ///
+    /// WAL offset after the write
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WAL append or sync fails.
     async fn write_batch_to_wal(
         &self,
         write_batch: &WriteBatch,
@@ -426,6 +660,25 @@ impl DbLogic {
         Ok(write_pos)
     }
 
+    /// Checks if the memtable is full and freezes it if necessary.
+    ///
+    /// When frozen, the memtable is moved to the immutable queue and a new
+    /// active memtable is created. Implements backpressure by blocking until
+    /// the immutable queue has space.
+    ///
+    /// # Arguments
+    ///
+    /// * `memtable` - Write guard for the active memtable
+    /// * `wal_offset` - Current WAL offset for recovery coordination
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)`: Memtable was frozen
+    /// - `Ok(false)`: Memtable was not full
+    ///
+    /// # Errors
+    ///
+    /// This method does not currently return errors.
     async fn try_freeze_memtable(
         &self,
         mut memtable: RwLockWriteGuard<'_, MemtableRef>,
@@ -474,6 +727,19 @@ impl DbLogic {
         }
     }
 
+    /// Flushes an immutable memtable to a new L0 sorted table.
+    ///
+    /// Takes the oldest immutable memtable from the queue, writes it to disk as a
+    /// sorted table, updates the manifest, prunes the WAL, and notifies waiting writers.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)`: Successfully flushed a memtable
+    /// - `Ok(false)`: No memtable to flush
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if table creation, manifest update, or WAL operations fail.
     #[tracing::instrument(skip(self))]
     pub async fn do_memtable_compaction(&self) -> Result<bool, Error> {
         log::trace!("Attempting memtable compaction");
@@ -564,11 +830,25 @@ impl DbLogic {
         }
     }
 
-    /// Do compaction if necessary
+    /// Attempts level-to-level compaction across all levels.
     ///
-    /// Returns true if we should try again. This can happen for two reasons:
-    ///     1. Compaction succeded and there might be more to compact
-    ///     2. Compaction failed due to locks and we should try to grab the locks again
+    /// Iterates through levels L0 to Ln-1, attempting to compact each level with
+    /// the level below it. Stops at the first successful compaction.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)`: Compaction completed or retry recommended (lock contention)
+    /// - `Ok(false)`: No compaction was needed on any level
+    ///
+    /// # Retry Logic
+    ///
+    /// Returns `true` in two cases:
+    /// 1. Compaction succeeded → there might be more work
+    /// 2. Lock contention occurred → retry may succeed
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if compaction operations fail (I/O, manifest updates, etc.).
     #[tracing::instrument(skip(self))]
     pub async fn do_level_compaction(&self) -> Result<bool, Error> {
         let mut was_locked = false;
@@ -601,12 +881,28 @@ impl DbLogic {
         Ok(was_locked)
     }
 
-    /// Compact the specified level
+    /// Compacts selected tables from a parent level to the child level below.
     ///
-    /// This has three possible behaviors:
-    ///    1. A "fast" compaction where a table simply gets moved down one level
-    ///    2. Regular compaction where one or multiple tables get merged with a table on a level below
-    ///    3. Abort due to concurrency
+    /// # Compaction Strategies
+    ///
+    /// 1. **Fast compaction**: Single table with no overlaps → simply move to next level
+    /// 2. **Merge compaction**: Merge overlapping tables using k-way merge
+    /// 3. **Abort**: Lock contention or concurrent compaction detected
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_level` - Source level to compact from
+    /// * `child_level` - Destination level (must be `parent_level.index + 1`)
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(CompactResult::DidWork)`: Compaction completed
+    /// - `Ok(CompactResult::NothingToDo)`: No compaction needed or aborted
+    /// - `Ok(CompactResult::Locked)`: Aborted due to lock contention
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if table building, I/O, or manifest updates fail.
     #[tracing::instrument(skip(self, parent_level, child_level))]
     async fn compact_level(
         &self,
@@ -865,10 +1161,29 @@ impl DbLogic {
         Ok(CompactResult::DidWork)
     }
 
+    /// Stops the database and flushes pending data.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WAL shutdown fails.
     pub async fn stop(&self) -> Result<(), Error> {
         self.wal.stop().await
     }
 
+    /// Performs fast compaction by moving a table to the next level without merging.
+    ///
+    /// Used when a single table has no overlaps in the child level. Instead of
+    /// creating a new table, the existing table is simply moved.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_level` - Source level
+    /// * `child_level` - Destination level
+    /// * `table_id` - ID of the table to move
     async fn fast_compaction(&self, parent_level: &Level, child_level: &Level, table_id: TableId) {
         let mut all_parent_tables = parent_level.get_tables_rw().await;
         let mut all_child_tables = child_level.get_tables_rw().await;

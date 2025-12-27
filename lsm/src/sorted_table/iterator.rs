@@ -175,8 +175,10 @@ impl TableIterator {
     }
 }
 
+/// Implements the `InternalIterator` trait for `TableIterator`.
 #[async_trait]
 impl InternalIterator for TableIterator {
+    /// Returns `true` if the iterator has passed the end of the table.
     fn at_end(&self) -> bool {
         if self.reverse {
             self.block_pos < -1
@@ -185,14 +187,17 @@ impl InternalIterator for TableIterator {
         }
     }
 
+    /// Advances the iterator to the next entry.
     fn get_key(&self) -> &[u8] {
         &self.key
     }
 
+    /// Returns the sequence number of the current entry.
     fn get_seq_number(&self) -> SeqNumber {
         self.entry.get_sequence_number()
     }
 
+    /// Returns a reference to the current entry the iterator is pointing to.
     #[cfg(feature = "wisckey")]
     async fn get_entry(&self, value_log: &ValueLog) -> Option<EntryRef> {
         match self.entry.get_type() {
@@ -207,6 +212,7 @@ impl InternalIterator for TableIterator {
         }
     }
 
+    /// Returns a reference to the current entry the iterator is pointing to.
     #[cfg(not(feature = "wisckey"))]
     fn get_entry(&self) -> Option<EntryRef> {
         match self.entry.get_type() {
@@ -217,10 +223,12 @@ impl InternalIterator for TableIterator {
         }
     }
 
+    /// Returns the type of the current entry (Put or Delete).
     fn get_entry_type(&self) -> DataEntryType {
         self.entry.get_type()
     }
 
+    /// Advances the iterator to the next entry.
     #[tracing::instrument(skip(self))]
     async fn step(&mut self) {
         if self.reverse {

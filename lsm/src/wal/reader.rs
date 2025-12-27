@@ -1,3 +1,38 @@
+//! WAL Reader for Crash Recovery
+//!
+//! This module provides the [`WalReader`] type which is responsible for reading
+//! and replaying write-ahead log entries during database recovery after a crash
+//! or restart.
+//!
+//! # Recovery Process
+//!
+//! When the database starts up, the reader:
+//! 1. Opens WAL files starting from the position recorded in the manifest
+//! 2. Sequentially reads and parses each log entry
+//! 3. Replays write operations into the memtable
+//! 4. For Wisckey mode, also updates the value index with deletion markers
+//! 5. Continues until all WAL files have been processed or an incomplete entry is found
+//!
+//! # Entry Format Parsing
+//!
+//! The reader understands the WAL entry format:
+//! - Reads the entry type byte first to determine the operation
+//! - Parses operation-specific data based on the entry type
+//! - Handles variable-length keys and values
+//! - Correctly handles entries that span multiple WAL pages
+//!
+//! # Error Handling
+//!
+//! The reader is designed to handle:
+//! - Incomplete entries at the end of the last WAL file (normal during recovery)
+//! - Missing WAL files (indicates recovery is complete)
+//! - Corrupted entry type bytes (panics, as this indicates data corruption)
+//!
+//! # Thread Safety
+//!
+//! The reader is not thread-safe and should only be used during the single-threaded
+//! recovery phase before normal database operations begin.
+
 use std::path::PathBuf;
 
 use zerocopy::FromBytes;
@@ -10,22 +45,77 @@ use crate::{Error, disk};
 
 use super::{LogEntryType, PAGE_SIZE, WalWriter, WriteOp};
 
-/// WAL reader used during recovery
+/// Reads and replays write-ahead log entries during crash recovery.
+///
+/// The `WalReader` sequentially processes WAL files to restore database state
+/// after a crash or restart. It maintains the current position in the log and
+/// handles reading data that may span multiple WAL page files.
+///
+/// # Position Tracking
+///
+/// The reader tracks an absolute byte position across all WAL files:
+/// - Position 0-4095: First file (00000001.wal)
+/// - Position 4096-8191: Second file (00000002.wal)
+/// - And so on...
+///
+/// # Page Management
+///
+/// The reader loads one WAL page (file) at a time into memory. When reading crosses
+/// a page boundary, it automatically loads the next page. This keeps memory usage
+/// bounded regardless of total WAL size.
 pub struct WalReader {
     position: usize,
     current_page: Vec<u8>,
     db_path: PathBuf,
 }
 
+/// Statistics and results from the WAL recovery process.
+///
+/// This structure contains information about what was recovered from the WAL,
+/// which is useful for logging, debugging, and determining the starting state
+/// after recovery completes.
 #[derive(Default)]
 pub struct RecoveryResult {
+    /// The absolute byte position where recovery ended.
+    ///
+    /// This is the position immediately after the last successfully parsed WAL entry.
+    /// New write operations will continue from this position.
     pub new_position: usize,
+    
+    /// The total number of log entries successfully recovered and replayed.
+    ///
+    /// This count includes all entry types (writes, deletes, value deletions, etc.).
     pub entries_recovered: usize,
+    
+    /// List of value batches marked for deletion during recovery (Wisckey only).
+    ///
+    /// These batches were marked for deletion in the WAL but may not have been
+    /// physically deleted yet. They will be cleaned up during garbage collection.
     #[cfg(feature = "wisckey")]
     pub value_batches_to_delete: Vec<ValueBatchId>,
 }
 
 impl WalReader {
+    /// Creates a new WAL reader starting from the specified position.
+    ///
+    /// Opens the WAL file containing the start position and prepares for reading.
+    /// The start position is typically obtained from the database manifest.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_path` - Path to the database directory containing WAL files
+    /// * `start_position` - Absolute byte position to start reading from
+    ///
+    /// # Returns
+    ///
+    /// Returns the initialized reader, or an error if the WAL file cannot be opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The database directory does not exist
+    /// - The WAL file at the calculated position cannot be read
+    /// - File I/O operations fail
     pub async fn new(db_path: PathBuf, start_position: usize) -> Result<Self, Error> {
         let position = start_position;
         let file_num = position / PAGE_SIZE;
@@ -44,6 +134,39 @@ impl WalReader {
         })
     }
 
+    /// Runs the recovery process, replaying all WAL entries into the memtable and value index.
+    ///
+    /// This is the main recovery method for Wisckey mode. It reads each entry from the WAL
+    /// and applies it to the appropriate data structure:
+    /// - Write operations are inserted into the memtable
+    /// - Value deletions update the value index
+    /// - Batch deletions mark entire value batches as deleted
+    ///
+    /// The method continues until it encounters:
+    /// - An incomplete entry (normal at the end of the last WAL file)
+    /// - A missing WAL file (indicates all entries have been recovered)
+    ///
+    /// # Arguments
+    ///
+    /// * `memtable` - Mutable reference to the memtable to populate with recovered writes
+    /// * `value_index` - Mutable reference to the value index to update with deletion markers
+    ///
+    /// # Returns
+    ///
+    /// Returns a `RecoveryResult` containing:
+    /// - The position where recovery ended (for continuing normal operations)
+    /// - The number of entries recovered
+    /// - List of value batches to delete
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A WAL entry has an invalid or corrupted format
+    /// - File I/O operations fail unexpectedly
+    ///
+    /// # Panics
+    ///
+    /// Panics if an entry type byte has an unexpected value, indicating WAL corruption.
     #[cfg(feature = "wisckey")]
     pub async fn run(
         &mut self,
@@ -112,6 +235,32 @@ impl WalReader {
         Ok(result)
     }
 
+    /// Parses and applies a write operation entry to the memtable.
+    ///
+    /// Reads a complete write entry (Put or Delete) from the current position and
+    /// applies it to the memtable, restoring the operation as if it had just been
+    /// executed.
+    ///
+    /// # Entry Format
+    ///
+    /// - Operation type (1 byte): PUT_OP or DELETE_OP
+    /// - Key length (8 bytes, little-endian u64)
+    /// - Key data (variable length)
+    /// - For PUT_OP only:
+    ///   - Value length (8 bytes)
+    ///   - Value data (variable length)
+    ///
+    /// # Arguments
+    ///
+    /// * `memtable` - The memtable to insert the recovered operation into
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the entry cannot be read completely or has invalid format.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operation type is neither PUT_OP nor DELETE_OP.
     async fn parse_write_entry(&mut self, memtable: &mut Memtable) -> Result<(), Error> {
         let op_type: u8 = self.read_value().await?;
         let key_len: u64 = self.read_value().await?;
@@ -133,16 +282,54 @@ impl WalReader {
         Ok(())
     }
 
-    /// Fetches a value from the current position at the log
-    /// and advances the position
+    /// Reads a typed value from the current WAL position.
     ///
-    /// This might open the next page of the log, if needed
+    /// This is a generic helper method that reads a fixed-size value of type `T`
+    /// from the WAL and deserializes it using the `FromBytes` trait. The position
+    /// is automatically advanced by the size of `T`.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - The type to read, must implement `FromBytes`. Common types include
+    ///   `u8`, `u16`, `u64` for reading fixed-size integers.
+    ///
+    /// # Returns
+    ///
+    /// Returns the deserialized value of type `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Not enough data remains in the WAL
+    /// - The next WAL page cannot be opened
+    ///
+    /// # Note
+    ///
+    /// This method may open the next WAL page file if reading crosses a page boundary.
     async fn read_value<T: Sized + FromBytes>(&mut self) -> Result<T, Error> {
         let mut data = vec![0u8; std::mem::size_of::<T>()];
         self.read_from_log(&mut data, false).await?;
         Ok(T::read_from_bytes(&data).unwrap())
     }
 
+    /// Parses and applies a value deletion entry to the value index.
+    ///
+    /// Reads a value deletion record from the WAL and marks the corresponding
+    /// value as deleted in the value index. This is used during recovery to
+    /// restore the deletion state.
+    ///
+    /// # Entry Format
+    ///
+    /// - Page ID (variable size integer)
+    /// - Offset within page (2 bytes, u16)
+    ///
+    /// # Arguments
+    ///
+    /// * `value_index` - The value index to update with the deletion marker
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the entry cannot be read completely.
     #[cfg(feature = "wisckey")]
     async fn parse_value_deletion_entry(
         &mut self,
@@ -155,6 +342,25 @@ impl WalReader {
         Ok(())
     }
 
+    /// Parses and applies a batch deletion entry to the value index.
+    ///
+    /// Reads a batch deletion record from the WAL and marks the corresponding
+    /// value batch as deleted in the value index. This is used during recovery
+    /// to restore the deletion state of entire batches.
+    ///
+    /// # Entry Format
+    ///
+    /// - Page ID (variable size integer)
+    /// - Batch index within page (2 bytes, u16)
+    ///
+    /// # Arguments
+    ///
+    /// * `value_index` - The value index to update with the batch deletion marker
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the entry cannot be read completely or the index
+    /// update fails.
     #[cfg(feature = "wisckey")]
     async fn parse_batch_deletion_entry(
         &mut self,
@@ -168,10 +374,37 @@ impl WalReader {
         Ok(())
     }
 
-    /// Read the next entry from the log
-    /// (only used during recovery)
+    /// Reads raw bytes from the WAL into the provided buffer.
     ///
-    /// TODO: Change this to just fetch an entire page at a time
+    /// This is the low-level method for reading data from WAL files. It handles:
+    /// - Reading data that may span multiple WAL page files
+    /// - Automatically loading the next page when needed
+    /// - Detecting the end of the WAL during recovery
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - Buffer to read data into. Must be non-empty.
+    /// * `maybe` - If true, missing next page or incomplete data returns `Ok(false)`
+    ///   instead of an error. Used when we're not sure if more data exists.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)`: Successfully read all requested bytes
+    /// - `Ok(false)`: End of WAL reached (only when `maybe` is true)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - File I/O operations fail (unless `maybe` is true and the error is NotFound)
+    /// - The buffer cannot be filled and `maybe` is false
+    ///
+    /// # Implementation Notes
+    ///
+    /// The method reads data in chunks, handling page boundaries:
+    /// 1. Read as much as possible from the current page
+    /// 2. If more data is needed, load the next page
+    /// 3. If the current page is not full and not on a boundary, assume we've reached the end
+    /// 4. Repeat until the buffer is full or the end is reached
     async fn read_from_log(&mut self, out: &mut [u8], maybe: bool) -> Result<bool, Error> {
         let buffer_len = out.len();
         let mut buffer_pos = 0;

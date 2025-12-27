@@ -1,3 +1,86 @@
+//! SSTable Builder for Creating Sorted Tables
+//!
+//! This module provides the [`TableBuilder`] type for constructing sorted tables (SSTables)
+//! during compaction and memtable flushes. The builder creates immutable, on-disk data
+//! structures optimized for fast lookups and sequential scans.
+//!
+//! # Overview
+//!
+//! The table builder is responsible for:
+//! - Organizing key-value pairs into fixed-size data blocks
+//! - Implementing prefix compression to reduce storage overhead
+//! - Creating block indexes for efficient key lookups
+//! - Managing restart points for binary search within blocks
+//! - Writing completed blocks to disk asynchronously
+//!
+//! # Building Process
+//!
+//! Tables must be built by adding entries in strictly sorted key order:
+//!
+//! ```rust,ignore
+//! let mut builder = TableBuilder::new(table_id, params, data_blocks, min_key, max_key);
+//!
+//! // Add entries in sorted order
+//! builder.add_value(&key1, seq1, value1).await?;
+//! builder.add_value(&key2, seq2, value2).await?;
+//! builder.add_deletion(&key3, seq3).await?;
+//!
+//! // Finalize the table
+//! let table = builder.finish().await?;
+//! ```
+//!
+//! # Data Organization
+//!
+//! ## Data Blocks
+//!
+//! Entries are grouped into fixed-size data blocks (configured by `max_key_block_size`).
+//! When a block fills up, it's automatically finalized, written to disk, and a new block
+//! begins. Each block stores:
+//! - Entry headers (key prefix length, key suffix, sequence number, operation type)
+//! - Key data (with prefix compression)
+//! - Value data (inline or as references in WiscKey mode)
+//! - Restart point offsets for binary search
+//!
+//! ## Index Block
+//!
+//! The index block is created when `finish()` is called and contains:
+//! - Mapping of first keys to data block IDs
+//! - Table metadata (min key, max key, total size)
+//! - Bloom filter (optional, for faster negative lookups)
+//!
+//! # Prefix Compression
+//!
+//! To reduce storage overhead, keys within a block are prefix-compressed relative to
+//! the previous key. The compression restarts at regular intervals (`block_restart_interval`)
+//! to enable efficient binary search within blocks.
+//!
+//! For example:
+//! - Key 1: "user:alice:email"
+//! - Key 2: "user:alice:name" → stored as prefix_len=11, suffix="name"
+//! - Key 3: "user:bob:email" → stored as prefix_len=5, suffix="bob:email"
+//!
+//! # WiscKey Mode
+//!
+//! When the `wisckey` feature is enabled:
+//! - Values are stored separately in the value log
+//! - SSTables only store references (batch ID, offset)
+//! - This reduces write amplification during compaction
+//!
+//! # Block Management
+//!
+//! The builder automatically manages block lifecycle:
+//! 1. Entries accumulate in the current block
+//! 2. When `max_key_block_size` is reached, the block is finalized
+//! 3. The block is written to disk asynchronously
+//! 4. A new empty block is created
+//! 5. The first key of each block is recorded in the index
+//!
+//! # Concurrency
+//!
+//! The builder itself is not thread-safe and should only be used by a single thread.
+//! However, it writes blocks to disk asynchronously through the `DataBlocks` manager,
+//! which handles caching and concurrent access to completed blocks.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32};
 

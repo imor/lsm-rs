@@ -1,3 +1,142 @@
+//! Data Block Builder for Creating Sorted Blocks
+//!
+//! This module provides the [`DataBlockBuilder`] type for incrementally constructing data
+//! blocks during SSTable creation. The builder handles prefix compression, restart point
+//! management, and optional bloom filter construction.
+//!
+//! # Overview
+//!
+//! The `DataBlockBuilder` is used during memtable flushes and compaction operations to
+//! create immutable data blocks containing sorted key-value entries. It optimizes storage
+//! through prefix compression while maintaining efficient lookup capabilities via restart
+//! points.
+//!
+//! # Building Process
+//!
+//! Blocks are built incrementally by adding entries in sorted key order:
+//!
+//! 1. **Create builder**: Initialize with `DataBlockBuilder::new()`
+//! 2. **Add entries**: Call `add_entry()` for each key-value pair in sorted order
+//! 3. **Finalize**: Call `finish()` to complete the block, write to disk, and cache
+//!
+//! # Prefix Compression
+//!
+//! The builder automatically implements prefix compression to reduce storage overhead:
+//!
+//! - Compares each key with the previous key to find the common prefix
+//! - Stores only the unique suffix along with the prefix length
+//! - At restart intervals, stores full keys (prefix_len=0) for binary search
+//!
+//! **Example compression:**
+//! ```text
+//! Entry 0 (restart): "database:users:1001" → full key, 19 bytes
+//! Entry 1:           "database:users:1002" → prefix=17, suffix="02", 2 bytes
+//! Entry 2:           "database:users:1003" → prefix=17, suffix="03", 2 bytes
+//! ```
+//!
+//! This can provide significant space savings for keys with common prefixes like
+//! timestamps, user IDs, or hierarchical namespaces.
+//!
+//! # Restart Points
+//!
+//! At regular intervals (configured by `block_restart_interval`), the builder creates
+//! restart points:
+//!
+//! - Stores a full, uncompressed key
+//! - Records the byte offset in the restart list
+//! - Enables binary search in the finished block
+//!
+//! **Trade-offs:**
+//! - Lower interval (e.g., 8): Faster lookups, more space overhead
+//! - Higher interval (e.g., 32): Better compression, slower lookups
+//!
+//! The default interval of 16 provides a good balance for most workloads.
+//!
+//! # Bloom Filters
+//!
+//! When the `bloom-filters` feature is enabled, the builder constructs a bloom filter
+//! alongside the block data:
+//!
+//! - Each key is added to the bloom filter via `bloom_filter.set(key)`
+//! - The filter is serialized into the block header
+//! - Allows O(1) negative lookups ("definitely not present")
+//! - Small false positive rate ("might be present")
+//!
+//! Bloom filters are especially valuable for blocks that are rarely accessed, as they
+//! can avoid disk I/O entirely for non-existent keys.
+//!
+//! # Block Finalization
+//!
+//! The `finish()` method completes block construction:
+//!
+//! 1. **Generate ID**: Obtains a unique block identifier from the manifest
+//! 2. **Write header**: Populates the DataBlockHeader with metadata
+//! 3. **Append restart list**: Adds the array of restart point offsets
+//! 4. **Create DataBlock**: Constructs the in-memory representation
+//! 5. **Write to disk**: Persists the complete block data
+//! 6. **Cache block**: Stores in the LRU cache for immediate access
+//!
+//! # Memory Management
+//!
+//! The builder accumulates data in memory until `finish()` is called. For large blocks:
+//! - Monitor `current_size()` to track memory usage
+//! - Finish blocks before they exceed target size limits
+//! - The parent TableBuilder manages block size limits automatically
+//!
+//! # WiscKey Mode
+//!
+//! The builder supports two storage modes:
+//!
+//! **Vanilla Mode** (default):
+//! - Values stored inline with keys in the block
+//! - Entry format: header + key suffix + value data
+//!
+//! **WiscKey Mode** (`wisckey` feature):
+//! - Values stored separately in value log
+//! - Entry format: header + key suffix (no value data)
+//! - Header contains value reference (batch ID, offset)
+//! - Significantly reduces write amplification during compaction
+//!
+//! # Error Handling
+//!
+//! The builder's `finish()` method can fail if:
+//! - Disk write operations fail (I/O errors)
+//! - File system is out of space
+//! - Permission issues prevent file creation
+//!
+//! On failure, the block is not added to the cache and the error is propagated to
+//! the caller for appropriate handling (typically causing compaction/flush to retry).
+//!
+//! # Usage Example
+//!
+//! ```rust,ignore
+//! use lsm::data_blocks::{DataBlockBuilder, DataBlocks};
+//!
+//! // Create a builder
+//! let data_blocks = Arc::new(DataBlocks::new(params, manifest));
+//! let mut builder = DataBlockBuilder::new(data_blocks);
+//!
+//! // Add entries in sorted order
+//! builder.add_entry(
+//!     PrefixedKey::new(0, b"key1".to_vec()),
+//!     b"key1",
+//!     seq_number,
+//!     PUT_OP,
+//!     b"value1"
+//! );
+//!
+//! builder.add_entry(
+//!     PrefixedKey::new(3, b"2".to_vec()),  // shares "key" prefix
+//!     b"key2",
+//!     seq_number,
+//!     PUT_OP,
+//!     b"value2"
+//! );
+//!
+//! // Finalize and write to disk
+//! let block_id = builder.finish().await?;
+//! ```
+
 use cfg_if::cfg_if;
 
 use std::sync::Arc;

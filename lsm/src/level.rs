@@ -1,3 +1,28 @@
+//! LSM-tree level structure and table management.
+//!
+//! This module implements the `Level` abstraction, which organizes sorted tables (SSTables)
+//! into hierarchical levels within the LSM-tree. Each level maintains:
+//! - A collection of sorted tables with non-overlapping key ranges (except L0)
+//! - Metadata for compaction scheduling and table selection
+//! - Placeholders to coordinate concurrent compaction operations
+//! - Capacity management based on level-specific size limits
+//!
+//! # Level Organization
+//!
+//! - **Level 0 (L0)**: Contains recently flushed memtables. Tables may have overlapping
+//!   key ranges and are ordered by creation time (newest to oldest).
+//! - **Level 1+**: Contain compacted tables with non-overlapping key ranges, sorted by
+//!   minimum key for efficient lookups.
+//!
+//! # Compaction Strategy
+//!
+//! The level supports two compaction triggers:
+//! - **Size-based**: Triggered when total level size exceeds `max_size()`
+//! - **Seek-based**: Triggered when a table exceeds its maximum seek count
+//!
+//! Compaction involves selecting tables from this level and merging them with
+//! overlapping tables in the next level down.
+
 use crate::data_blocks::{DataBlocks, DataEntry};
 use crate::manifest::{INVALID_TABLE_ID, LevelId, Manifest};
 use crate::sorted_table::{SortedTable, TableBuilder, TableId};
@@ -10,37 +35,91 @@ use tokio::sync::RwLock;
 
 use parking_lot::Mutex as PMutex;
 
-/// TODO add slowdown writes trigger
+/// Minimum number of L0 tables before size-based compaction is triggered.
+/// TODO: add slowdown writes trigger
 const L0_COMPACTION_TRIGGER: usize = 4;
 
+/// Vector of sorted tables wrapped in Arc for shared ownership.
 pub type TableVec = Vec<Arc<SortedTable>>;
 
+/// A placeholder representing a table being created during compaction.
+///
+/// Placeholders prevent race conditions by reserving key ranges during concurrent
+/// compaction operations. They are inserted before compaction begins and removed
+/// once the new table is finalized.
 pub struct TablePlaceholder {
+    /// Minimum key in the placeholder's range.
     min: Key,
+    /// Maximum key in the placeholder's range.
     max: Key,
+    /// Unique identifier for this placeholder/table.
     id: TableId,
 }
 
 impl TablePlaceholder {
+    /// Checks if this placeholder overlaps with the given key range.
+    ///
+    /// # Arguments
+    ///
+    /// * `min` - Minimum key of the range to check
+    /// * `max` - Maximum key of the range to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if the ranges overlap, `false` otherwise
     fn overlaps(&self, min: &[u8], max: &[u8]) -> bool {
         self.max.as_slice() >= min && self.min.as_slice() <= max
     }
 }
 
+/// Represents a single level in the LSM-tree hierarchy.
+///
+/// Each level maintains a collection of sorted tables and provides methods for:
+/// - Reading values by key
+/// - Adding new tables (from memtable flushes or compaction)
+/// - Selecting tables for compaction
+/// - Detecting key range overlaps
+///
+/// # Concurrency
+///
+/// Level operations use fine-grained locking:
+/// - Table list is protected by an async RwLock for concurrent reads
+/// - Compaction offset uses a parking_lot Mutex for low-latency updates
+/// - Atomic operations track seek-based compaction candidates
 pub struct Level {
+    /// Level index (0 for L0, 1 for L1, etc.).
     index: LevelId,
+    /// Offset for round-robin table selection during size-based compaction.
     next_compaction_offset: PMutex<usize>,
+    /// Whether seek-based compaction is enabled for this level.
     do_seek_based_compaction: bool,
+    /// Table ID candidate for seek-based compaction (INVALID_TABLE_ID if none).
     seek_based_compaction: AtomicU64,
+    /// Shared data block cache and I/O handler.
     data_blocks: Arc<DataBlocks>,
+    /// Collection of sorted tables at this level.
     tables: RwLock<TableVec>,
+    /// Database configuration parameters.
     params: Arc<Params>,
+    /// Manifest for tracking table metadata and generating IDs.
     manifest: Arc<Manifest>,
-    // Tables in the process of being created
+    /// Tables in the process of being created during compaction.
     table_placeholders: RwLock<Vec<TablePlaceholder>>,
 }
 
 impl Level {
+    /// Creates a new empty level.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Level index (0 for L0, 1 for L1, etc.)
+    /// * `data_blocks` - Shared data block cache and I/O handler
+    /// * `params` - Database configuration parameters
+    /// * `manifest` - Manifest for tracking table metadata
+    ///
+    /// # Returns
+    ///
+    /// A new `Level` instance with no tables
     pub fn new(
         index: LevelId,
         data_blocks: Arc<DataBlocks>,
@@ -60,14 +139,29 @@ impl Level {
         }
     }
 
-    /// Set where to (try to) compact next
-    /// (only used for testing)
+    /// Sets the next compaction offset for round-robin table selection.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Index of the next table to consider for compaction
+    ///
+    /// # Note
+    ///
+    /// This method is primarily used for testing to control compaction behavior.
     #[allow(dead_code)]
     pub fn set_next_compaction_offset(&self, offset: usize) {
         *self.next_compaction_offset.lock() = offset;
     }
 
-    /// Table placeholder must be removed once compaction is done
+    /// Removes a table placeholder after compaction completes.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Table ID of the placeholder to remove
+    ///
+    /// # Panics
+    ///
+    /// Panics if no placeholder with the given ID exists.
     pub async fn remove_table_placeholder(&self, id: TableId) {
         let mut placeholders = self.table_placeholders.write().await;
         for (pos, placeholder) in placeholders.iter().enumerate() {
@@ -80,6 +174,19 @@ impl Level {
         panic!("no such placeholder");
     }
 
+    /// Loads an existing sorted table from disk and adds it to this level.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Table ID to load
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table cannot be loaded from disk.
     pub async fn load_table(&self, id: TableId) -> Result<(), Error> {
         let table = SortedTable::load(id, self.data_blocks.clone(), &self.params).await?;
 
@@ -90,6 +197,17 @@ impl Level {
         Ok(())
     }
 
+    /// Creates a table builder for constructing a new sorted table at this level.
+    ///
+    /// # Arguments
+    ///
+    /// * `identifier` - Unique table ID for the new table
+    /// * `min_key` - Minimum key that will be in the table
+    /// * `max_key` - Maximum key that will be in the table
+    ///
+    /// # Returns
+    ///
+    /// A `TableBuilder` configured for this level
     pub fn build_table(&self, identifier: TableId, min_key: Key, max_key: Key) -> TableBuilder<'_> {
         TableBuilder::new(
             identifier,
@@ -100,19 +218,44 @@ impl Level {
         )
     }
 
+    /// Returns the level index.
+    ///
+    /// # Returns
+    ///
+    /// Level index (0 for L0, 1 for L1, etc.)
     pub fn get_index(&self) -> u32 {
         self.index
     }
 
+    /// Adds a newly flushed table to L0.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The sorted table to add
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a level other than L0.
     pub async fn add_l0_table(&self, table: SortedTable) {
         assert_eq!(self.index, 0);
         let mut tables = self.tables.write().await;
         tables.push(Arc::new(table));
     }
 
-    /// Gets an entry for particular key in this table
-    /// Returns None if no entry for the key exists
-    /// The returned boolean indicates if compaction for this level is needed
+    /// Retrieves a data entry for the given key from this level.
+    ///
+    /// Searches tables from newest to oldest (important for L0 which may have overlapping keys).
+    /// If seek-based compaction is enabled, increments seek counters and may trigger compaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to search for
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - `bool`: `true` if seek-based compaction was triggered for this level
+    /// - `Option<DataEntry>`: The data entry if found, `None` otherwise
     #[tracing::instrument(skip(self,key), fields(index=self.index))]
     pub async fn get(&self, key: &[u8]) -> (bool, Option<DataEntry>) {
         let tables = self.tables.read().await;
@@ -150,6 +293,21 @@ impl Level {
         (compaction_triggered, None)
     }
 
+    /// Calculates the maximum size (in bytes) for this level before compaction is triggered.
+    ///
+    /// The size limit grows exponentially with level depth:
+    /// - L0 and L1: 1 MB
+    /// - L2: 10 MB
+    /// - L3: 100 MB
+    /// - And so on (10x per level)
+    ///
+    /// # Returns
+    ///
+    /// Maximum size in bytes for this level
+    ///
+    /// # Note
+    ///
+    /// L0 compaction is triggered by table count, not size, so this value is not used for L0.
     pub fn max_size(&self) -> usize {
         // Note: the result for level zero is not really used since we set
         // the level-0 compaction threshold based on number of files.
@@ -166,8 +324,21 @@ impl Level {
         result
     }
 
-    /// Checks if any compaction can be done, and if so returns a list of tables to
-    /// be compacted
+    /// Checks if compaction should start and selects tables to compact.
+    ///
+    /// Compaction is triggered by:
+    /// - **L0**: Number of tables exceeds `L0_COMPACTION_TRIGGER`
+    /// - **L1+**: Total size exceeds `max_size()`
+    /// - **Any level**: A table exceeds its seek count (seek-based compaction)
+    ///
+    /// For L0, may select multiple overlapping tables. For L1+, selects a single table
+    /// using round-robin scheduling.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(tables))`: Compaction should proceed with the given tables
+    /// - `Ok(None)`: No compaction needed
+    /// - `Err(())`: Compaction was needed but failed due to lock contention
     #[tracing::instrument(skip(self))]
     pub async fn maybe_start_compaction(&self) -> Result<Option<Vec<Arc<SortedTable>>>, ()> {
         log::trace!("Checking if we should compact level");
@@ -276,17 +447,30 @@ impl Level {
         Ok(Some(tables))
     }
 
-    /// This is called on the target level at the beginning of compaction and does three things
+    /// Finds overlapping tables in this level and prepares for compaction.
     ///
-    /// 1. It checks for any tables that overlap and need to be compacted as well
-    /// 2. It will place a marker(lock) to prevent any concurrent compaction on the same range
-    /// 3. It checks for placeholders and aborts compaction if any are found
+    /// This method performs three critical operations:
+    /// 1. Identifies all tables whose key ranges overlap with `[min, max]`
+    /// 2. Sets compaction flags on overlapping tables (locks them for compaction)
+    /// 3. Creates a placeholder to reserve the key range and prevent concurrent compactions
     ///
-    /// On success this returns the TableId of the placeholder
-    /// This id then must be used to creat on the lower level
+    /// # Arguments
     ///
-    /// Note, if fast_path is set, and no overlaps exist, the supplied id will be used for the
-    /// placeholder
+    /// * `min` - Minimum key of the range to check for overlaps
+    /// * `max` - Maximum key of the range to check for overlaps
+    /// * `fast_path` - Optional table ID to use if no overlaps exist (for fast compaction)
+    ///
+    /// # Returns
+    ///
+    /// - `Some((table_id, overlapping_tables))`: Compaction can proceed
+    ///   - `table_id`: ID for the placeholder (and new table to be created)
+    ///   - `overlapping_tables`: Tables that must be compacted together
+    /// - `None`: Compaction aborted due to lock contention or existing placeholder
+    ///
+    /// # Note
+    ///
+    /// If `fast_path` is provided and no overlaps exist, the provided ID is used.
+    /// Otherwise, a new table ID is generated from the manifest.
     #[tracing::instrument(skip(self))]
     pub async fn get_overlaps(
         &self,
@@ -345,13 +529,21 @@ impl Level {
         Some((table_id, tables_to_compact))
     }
 
-    /// Get a reference to all tables with an exclusive/write lock
+    /// Acquires an exclusive write lock on the table collection.
+    ///
+    /// # Returns
+    ///
+    /// A write guard providing mutable access to the table vector
     #[inline]
     pub async fn get_tables_rw(&self) -> tokio::sync::RwLockWriteGuard<'_, TableVec> {
         self.tables.write().await
     }
 
-    /// Get a reference to all tables with a read-only lock
+    /// Acquires a shared read lock on the table collection.
+    ///
+    /// # Returns
+    ///
+    /// A read guard providing immutable access to the table vector
     #[inline]
     pub async fn get_tables_ro(&self) -> tokio::sync::RwLockReadGuard<'_, TableVec> {
         self.tables.read().await

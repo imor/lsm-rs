@@ -1,3 +1,26 @@
+//! Value index for tracking live data in value batches.
+//!
+//! The value index is a bitmap-based structure that tracks which values in the value log
+//! are still live (not deleted or compacted away). This enables efficient garbage collection
+//! by identifying batches with low live data ratios.
+//!
+//! ## Structure
+//!
+//! - **Index pages**: Fixed-size (4KB) chunks covering multiple batches
+//! - **Bitmaps**: One bit per value entry indicating if it's live
+//! - **Batch states**: Track if a batch is Active, Compacted, or Deleted
+//!
+//! ## Garbage Collection
+//!
+//! When a batch's live ratio falls below the threshold, it's eligible for GC:
+//! 1. Live values are copied to new batches
+//! 2. The old batch is marked as Deleted
+//! 3. Index page is updated and persisted
+//!
+//! ## Concurrency
+//!
+//! Uses RwLock for concurrent reads (common) and exclusive writes (GC operations).
+
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,25 +37,40 @@ use crate::{Error, Params, disk};
 
 use super::{MIN_VALUE_BATCH_ID, ValueBatchId};
 
+/// Unique identifier for an index page.
 pub type ValueIndexPageId = u64;
 
-/// The minimum valid data block identifier
+/// Minimum valid index page identifier.
 pub const MIN_VALUE_INDEX_PAGE_ID: ValueIndexPageId = 1;
 
+/// Header at the beginning of an index page.
 #[derive(KnownLayout, Immutable, IntoBytes, FromBytes)]
 #[repr(C, align(8))]
 struct IndexPageHeader {
+    /// Unique identifier for this page.
     identifier: ValueIndexPageId,
+
+    /// ID of the first batch tracked by this page.
     start_batch: ValueBatchId,
+
+    /// Number of batches tracked by this page.
     num_batches: u64,
+
+    /// Total number of value entries across all batches.
     num_entries: u64,
 }
 
+/// State of a value batch for garbage collection tracking.
 #[derive(KnownLayout, Immutable, IntoBytes, PartialEq, Eq, Copy, Clone)]
 #[repr(u8)]
 enum ValueBatchState {
+    /// Batch is active and contains live data.
     Active = 0,
+
+    /// Batch has been compacted (live values moved elsewhere).
     Compacted = 1,
+
+    /// Batch has been deleted from disk.
     Deleted = 2,
 }
 
@@ -50,34 +88,45 @@ impl TryFrom<u8> for ValueBatchState {
     }
 }
 
-/// An (up to) 4kb chunk of the value index
+/// A 4KB chunk of the value index tracking value liveness.
 ///
-/// Invariants:
-///   - offsets.len() == batches.len()
+/// Each page covers multiple value batches and maintains:
+/// - A bitmap indicating which values are live
+/// - Offsets pointing to each batch's position in the bitmap
+/// - State tracking (Active/Compacted/Deleted) for each batch
+///
+/// ## Invariants
+///
+/// - `offsets.len() == batches.len()`
+/// - Once sealed, no new batches can be added
+/// - Dirty flag indicates unsaved changes
 struct IndexPage {
+    /// Metadata header for this page.
     header: IndexPageHeader,
 
-    /// True if some changes to this page might not
-    /// have been written to disk yet
+    /// True if changes haven't been written to disk yet.
     dirty: bool,
 
-    /// Tracks the value batches covered by this page
-    /// and where they start in the bitmap
+    /// Starting position in the bitmap for each batch.
     offsets: Vec<u16>,
 
-    /// Tracks which batches in this index page have already
-    /// been garbage collected or deleted
+    /// State of each batch (Active, Compacted, or Deleted).
     batches: Vec<ValueBatchState>,
 
-    /// The actual bitmap
+    /// Bitmap tracking live values (one bit per value entry).
     entries: BitVec<u8>,
 
-    /// Once a page is sealed, no new batches can be added
-    /// (not stored on disk)
+    /// Once sealed, no new batches can be added (not stored on disk).
     sealed: bool,
 }
 
 impl IndexPage {
+    /// Creates a new empty index page.
+    ///
+    /// # Arguments
+    ///
+    /// * `identifier` - Unique ID for this page
+    /// * `start_batch` - The first batch ID that this page will track
     pub fn new(identifier: ValueIndexPageId, start_batch: ValueBatchId) -> Self {
         log::trace!("Creating new value index page with id={identifier}");
 
@@ -96,6 +145,19 @@ impl IndexPage {
         }
     }
 
+    /// Loads an index page from disk.
+    ///
+    /// Deserializes the page header, offset table, batch states, and bitmap
+    /// from the specified file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the index page file
+    /// * `sealed` - Whether this page should be marked as sealed (no more batches can be added)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or contains invalid data.
     pub async fn open(path: &Path, sealed: bool) -> Result<Self, Error> {
         let data = disk::read(path, 0).await.map_err(|err| {
             Error::from_io_error(
@@ -135,14 +197,29 @@ impl IndexPage {
         })
     }
 
+    /// Returns the unique identifier for this index page.
     pub fn get_identifier(&self) -> ValueIndexPageId {
         self.header.identifier
     }
 
-    /// Add a new value batch to this page
+    /// Adds a new value batch to this page.
     ///
-    /// - Returns true if there was enoguh space
-    /// - Note, this will not update the page until calling sync()
+    /// Attempts to allocate space in this page for tracking the specified number
+    /// of value entries. If successful, initializes the bitmap with all entries
+    /// marked as live.
+    ///
+    /// # Arguments
+    ///
+    /// * `num_entries` - Number of value entries in the batch to track
+    ///
+    /// # Returns
+    ///
+    /// `true` if there was enough space and the batch was added, `false` otherwise.
+    /// When false is returned, the page is marked as sealed.
+    ///
+    /// # Note
+    ///
+    /// Changes are not persisted until `sync()` is called.
     pub fn expand(&mut self, num_entries: usize) -> bool {
         assert!(!self.sealed);
 
@@ -176,7 +253,22 @@ impl IndexPage {
         }
     }
 
-    /// Write the current state of the page to the disk
+    /// Writes the current state of the page to disk.
+    ///
+    /// Serializes the header, offset table, batch states, and bitmap to the
+    /// specified file. Only writes if the page has been modified (dirty flag).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - File path where the page should be written
+    ///
+    /// # Returns
+    ///
+    /// `true` if the page was written, `false` if it was already clean.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written.
     pub async fn sync(&mut self, path: &Path) -> Result<bool, Error> {
         if !self.dirty {
             return Ok(false);
@@ -200,7 +292,14 @@ impl IndexPage {
         Ok(true)
     }
 
-    /// Are any of the values in this page still in use?
+    /// Checks if any values tracked by this page are still live.
+    ///
+    /// Used during garbage collection to determine if an entire page
+    /// can be deleted.
+    ///
+    /// # Returns
+    ///
+    /// `true` if at least one value is still marked as live, `false` otherwise.
     pub fn is_in_use(&self) -> bool {
         for val in self.entries.iter() {
             if *val {
@@ -210,11 +309,24 @@ impl IndexPage {
         false
     }
 
+    /// Returns whether this page is sealed.
+    ///
+    /// A sealed page cannot accept new batches and is considered full.
     pub fn is_sealed(&self) -> bool {
         self.sealed
     }
 
-    /// How many entries in the specified batch are still in use?
+    /// Counts the number of live entries in the specified batch.
+    ///
+    /// Used to determine if a batch is eligible for garbage collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to count live entries for
+    ///
+    /// # Returns
+    ///
+    /// The number of entries still marked as live in the batch.
     pub fn count_active_entries(&self, batch_id: ValueBatchId) -> usize {
         let (start_pos, end_pos) = self.get_batch_range(batch_id);
         let mut count = 0;
@@ -227,8 +339,18 @@ impl IndexPage {
         count
     }
 
-    /// The list of all entries (offsets) still in use in
-    /// a given batch
+    /// Returns the offsets of all live entries in the specified batch.
+    ///
+    /// Used during garbage collection to extract which values need to be
+    /// copied to new batches.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to get live entry offsets for
+    ///
+    /// # Returns
+    ///
+    /// A vector of offsets (as u32) for each live entry in the batch.
     pub fn get_active_entries(&self, batch_id: ValueBatchId) -> Vec<u32> {
         let (start_pos, end_pos) = self.get_batch_range(batch_id);
         self.entries[start_pos..end_pos]
@@ -245,6 +367,15 @@ impl IndexPage {
             .collect()
     }
 
+    /// Returns the start and end positions in the bitmap for the specified batch.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to get the range for
+    ///
+    /// # Returns
+    ///
+    /// A tuple (start_pos, end_pos) defining the slice of the bitmap for this batch.
     #[inline]
     fn get_batch_range(&self, batch_id: ValueBatchId) -> (usize, usize) {
         let start_idx = batch_id
@@ -261,10 +392,27 @@ impl IndexPage {
         (start_pos, end_pos)
     }
 
-    /// Mark a value as deleted (using its id)
+    /// Marks a value as deleted using its value ID.
     ///
-    /// - Returns the offset within the page that got changed
-    /// - Changes will not be persisted until we sync()
+    /// Clears the corresponding bit in the bitmap to indicate the value
+    /// is no longer live.
+    ///
+    /// # Arguments
+    ///
+    /// * `vid` - The value ID (batch_id, offset) to mark as deleted
+    ///
+    /// # Returns
+    ///
+    /// The absolute offset within the page's bitmap that was changed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry is already marked as deleted or if the batch ID
+    /// doesn't belong to this page.
+    ///
+    /// # Note
+    ///
+    /// Changes are not persisted until `sync()` is called.
     pub fn mark_value_as_deleted(&mut self, vid: ValueId) -> u16 {
         let (start_pos, end_pos) = self.get_batch_range(vid.0);
 
@@ -282,7 +430,14 @@ impl IndexPage {
         (start_pos as u16) + (vid.1 as u16)
     }
 
-    /// Mark a value as deleted (using its offset within the page)
+    /// Marks a value as deleted using its bitmap offset.
+    ///
+    /// This is used during recovery from the write-ahead log when we know
+    /// the exact bitmap offset but not the value ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The offset within the page's bitmap
     pub fn mark_value_as_deleted_at(&mut self, offset: u16) {
         let mut marker = self
             .entries
@@ -295,12 +450,34 @@ impl IndexPage {
         }
     }
 
+    /// Marks an entire batch as deleted.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to mark as deleted
+    ///
+    /// # Returns
+    ///
+    /// The index of the batch within this page.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batch is already marked as deleted.
     pub fn mark_batch_as_deleted(&mut self, batch_id: ValueBatchId) -> u16 {
         let idx = (batch_id - self.header.start_batch) as u16;
         self.mark_batch_as_deleted_at(idx);
         idx
     }
 
+    /// Marks a batch as deleted using its index within this page.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The index of the batch within this page
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batch is already marked as deleted.
     pub fn mark_batch_as_deleted_at(&mut self, index: u16) {
         let marker = self.batches.get_mut(index as usize).expect("Out of range?");
 
@@ -311,6 +488,22 @@ impl IndexPage {
         *marker = ValueBatchState::Deleted;
     }
 
+    /// Marks a batch as compacted.
+    ///
+    /// A compacted batch has had its live values moved to other batches
+    /// during garbage collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to mark as compacted
+    ///
+    /// # Returns
+    ///
+    /// The index of the batch within this page.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batch is already compacted or deleted.
     pub fn mark_batch_as_compacted(&mut self, batch_id: ValueBatchId) -> u16 {
         let idx = batch_id - self.header.start_batch;
         let marker = self.batches.get_mut(idx as usize).expect("Out of range?");
@@ -348,6 +541,16 @@ pub struct ValueIndex {
 }
 
 impl ValueIndex {
+    /// Creates a new value index with an initial empty page.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Database configuration parameters
+    /// * `manifest` - Manifest for ID generation and metadata
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial page cannot be written to disk.
     pub async fn new(params: Arc<Params>, manifest: Arc<Manifest>) -> Result<Self, Error> {
         let obj = Self {
             params,
@@ -368,6 +571,18 @@ impl ValueIndex {
         Ok(obj)
     }
 
+    /// Opens an existing value index from disk.
+    ///
+    /// Loads all index pages from the manifest's tracked range.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Database configuration parameters
+    /// * `manifest` - Manifest containing index page metadata
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any index page file cannot be read.
     pub async fn open(params: Arc<Params>, manifest: Arc<Manifest>) -> Result<Self, Error> {
         let obj = Self {
             params,
@@ -394,6 +609,13 @@ impl ValueIndex {
         Ok(obj)
     }
 
+    /// Syncs all dirty index pages to disk.
+    ///
+    /// Iterates through all pages and writes those with pending changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any page cannot be written to disk.
     pub async fn sync(&self) -> Result<(), Error> {
         let mut count = 0;
         let mut pages = self.pages.write().await;
@@ -413,15 +635,33 @@ impl ValueIndex {
         Ok(())
     }
 
+    /// Returns the number of index pages currently loaded.
     pub async fn num_pages(&self) -> usize {
         self.pages.read().await.len()
     }
 
+    /// Returns the file path for an index page.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_id` - The unique identifier for the page
     #[inline]
     fn get_page_file_path(&self, page_id: &ValueIndexPageId) -> std::path::PathBuf {
         self.params.db_path.join(format!("vindex{page_id:08}.data"))
     }
 
+    /// Finds the index of the page containing the specified batch.
+    ///
+    /// Uses binary search on the sorted page list.
+    ///
+    /// # Arguments
+    ///
+    /// * `pages` - The list of pages to search
+    /// * `batch_id` - The batch ID to find
+    ///
+    /// # Returns
+    ///
+    /// The index of the page, or None if the batch has been garbage collected.
     #[inline]
     fn find_page_idx(
         pages: &VecDeque<(ValueBatchId, IndexPage)>,
@@ -436,6 +676,16 @@ impl ValueIndex {
         }
     }
 
+    /// Finds the page containing the specified batch.
+    ///
+    /// # Arguments
+    ///
+    /// * `pages` - Read guard on the page list
+    /// * `batch_id` - The batch ID to find
+    ///
+    /// # Returns
+    ///
+    /// A reference to the page, or None if not found.
     #[inline]
     fn find_page_for_batch<'a>(
         pages: &'a RwLockReadGuard<'_, VecDeque<(ValueBatchId, IndexPage)>>,
@@ -445,8 +695,17 @@ impl ValueIndex {
         Some(&pages[idx].1)
     }
 
-    /// Returns the number of active entries for the
-    /// specified batch
+    /// Returns the number of live entries in the specified batch.
+    ///
+    /// Used to determine if a batch is eligible for garbage collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to count live entries for
+    ///
+    /// # Returns
+    ///
+    /// The number of live entries, or 0 if the batch has been garbage collected.
     pub async fn count_active_entries(&self, batch_id: ValueBatchId) -> usize {
         let pages = self.pages.read().await;
         match Self::find_page_for_batch(&pages, batch_id) {
@@ -455,8 +714,19 @@ impl ValueIndex {
         }
     }
 
-    /// Returns a list of active entries (their offsets)
-    /// for the specified batch
+    /// Returns the offsets of all live entries in the specified batch.
+    ///
+    /// Used during garbage collection to identify which values need to be
+    /// copied to new batches.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to get live entry offsets for
+    ///
+    /// # Returns
+    ///
+    /// A vector of offsets for live entries, or an empty vector if the batch
+    /// has been garbage collected.
     pub async fn get_active_entries(&self, batch_id: ValueBatchId) -> Vec<u32> {
         let pages = self.pages.read().await;
         match Self::find_page_for_batch(&pages, batch_id) {
@@ -465,6 +735,18 @@ impl ValueIndex {
         }
     }
 
+    /// Adds a new batch to the index.
+    ///
+    /// Attempts to add the batch to the current page, creating a new page if needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The unique identifier for the batch
+    /// * `num_entries` - The number of value entries in the batch
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the page cannot be written to disk.
     pub async fn add_batch(&self, batch_id: ValueBatchId, num_entries: usize) -> Result<(), Error> {
         let mut pages = self.pages.write().await;
 
@@ -486,6 +768,12 @@ impl ValueIndex {
         Ok(())
     }
 
+    /// Creates a new index page and adds it to the page list.
+    ///
+    /// # Arguments
+    ///
+    /// * `pages` - Mutable reference to the page list
+    /// * `min_batch` - The first batch ID this page will track
     async fn create_new_page(
         &self,
         pages: &mut VecDeque<(ValueBatchId, IndexPage)>,
@@ -497,6 +785,20 @@ impl ValueIndex {
         pages.push_back((min_batch, page));
     }
 
+    /// Marks a batch as deleted in the index.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to mark as deleted
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (page_id, offset) indicating where the change was made,
+    /// for WAL logging.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batch is not found (already garbage collected).
     pub async fn mark_batch_as_deleted(
         &self,
         batch_id: ValueBatchId,
@@ -509,10 +811,19 @@ impl ValueIndex {
         Ok((page.get_identifier(), offset))
     }
 
-    /// Mark a batch at the specififed page and offset as
-    /// deleted
+    /// Marks a batch as deleted using page ID and batch index.
     ///
-    /// Only used during recovery
+    /// This is used during recovery from the write-ahead log when we have
+    /// the exact page and index from a previous deletion operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_id` - The ID of the page containing the batch
+    /// * `index` - The index of the batch within that page
+    ///
+    /// # Panics
+    ///
+    /// Panics if the page ID is not found.
     pub async fn mark_batch_as_deleted_at(
         &self,
         page_id: ValueIndexPageId,
@@ -526,6 +837,21 @@ impl ValueIndex {
         Ok(())
     }
 
+    /// Marks a batch as compacted in the index.
+    ///
+    /// A compacted batch has had its live values moved during garbage collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_id` - The batch to mark as compacted
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (page_id, offset) indicating where the change was made.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batch is not found (already garbage collected).
     pub async fn mark_batch_as_compacted(
         &self,
         batch_id: ValueBatchId,
@@ -538,6 +864,23 @@ impl ValueIndex {
         Ok((page.get_identifier(), offset))
     }
 
+    /// Marks a value as deleted in the index.
+    ///
+    /// This updates the bitmap to indicate the value is no longer live.
+    /// May trigger cleanup of unused pages.
+    ///
+    /// # Arguments
+    ///
+    /// * `vid` - The value ID (batch_id, offset) to mark as deleted
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (page_id, offset) indicating where the change was made,
+    /// for WAL logging.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batch is not found (already garbage collected).
     pub async fn mark_value_as_deleted(
         &self,
         vid: ValueId,
@@ -582,6 +925,18 @@ impl ValueIndex {
         Ok((page_id, offset))
     }
 
+    /// Marks a value as deleted using page ID and bitmap offset.
+    ///
+    /// This is used during recovery from the write-ahead log.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_id` - The ID of the page containing the value
+    /// * `offset` - The offset within the page's bitmap
+    ///
+    /// # Panics
+    ///
+    /// Panics if the page ID is not found.
     pub async fn mark_value_as_deleted_at(&self, page_id: ValueIndexPageId, offset: u16) {
         let mut pages = self.pages.write().await;
 

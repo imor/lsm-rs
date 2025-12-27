@@ -1,3 +1,133 @@
+//! Data Block Implementation for LSM-Tree SSTables
+//!
+//! This module provides the core data structure for storing sorted key-value entries in
+//! LSM-tree sorted tables (SSTables). Data blocks are the fundamental storage units that
+//! hold actual key-value data on disk with efficient compression and fast lookup capabilities.
+//!
+//! # Overview
+//!
+//! Data blocks are immutable, fixed-size units that store multiple key-value entries using
+//! prefix compression to minimize storage overhead. Each block is self-contained with:
+//! - A header containing metadata and optional bloom filter
+//! - Variable-length entries with prefix-compressed keys
+//! - A restart list enabling efficient binary search
+//!
+//! # Key Features
+//!
+//! ## Prefix Compression
+//!
+//! Consecutive sorted keys often share common prefixes. Data blocks exploit this by storing
+//! only the unique suffix of each key along with the length of the shared prefix from the
+//! previous key. This significantly reduces storage requirements for keys with common patterns.
+//!
+//! **Example:**
+//! ```text
+//! Key 1: "user:alice:email"    → stored as full key
+//! Key 2: "user:alice:name"     → prefix_len=11, suffix="name"
+//! Key 3: "user:bob:email"      → prefix_len=5, suffix="bob:email"
+//! ```
+//!
+//! ## Restart List
+//!
+//! While prefix compression saves space, it requires sequential reading to reconstruct keys.
+//! The restart list solves this by creating periodic "restart points" where full keys are
+//! stored (no compression), enabling efficient binary search.
+//!
+//! **How it works:**
+//! 1. Every N entries (restart_interval), a full key is stored
+//! 2. The byte offset of each restart entry is recorded in the restart list
+//! 3. Binary search on the restart list narrows down to a small range
+//! 4. Sequential scan within that range finds the exact key
+//!
+//! This provides O(log R) + O(N) lookup time where R is the number of restart points
+//! and N is the restart interval, which is much faster than scanning the entire block.
+//!
+//! ## Bloom Filters (Optional)
+//!
+//! When the `bloom-filters` feature is enabled, each block includes a probabilistic bloom
+//! filter in its header. This allows extremely fast negative lookups - if the bloom filter
+//! says a key is not present, we can skip searching the block entirely without any disk I/O.
+//!
+//! # On-Disk Layout
+//!
+//! ```text
+//! +------------------+
+//! | DataBlockHeader  |  (fixed size)
+//! |  - restart_list  |  (offset to restart list)
+//! |  - num_entries   |  (total entry count)
+//! |  - bloom_filter  |  (optional, 1056 bytes)
+//! +------------------+
+//! | Entry 1          |  (variable size)
+//! |  - EntryHeader   |
+//! |  - key suffix    |
+//! |  - value/ref     |
+//! +------------------+
+//! | Entry 2          |
+//! | ...              |
+//! +------------------+
+//! | Restart List     |  (array of u32 offsets)
+//! +------------------+
+//! ```
+//!
+//! # Entry Format
+//!
+//! Each entry consists of an `EntryHeader` followed by variable-length data:
+//!
+//! **Header Fields:**
+//! - `prefix_len` (4 bytes) - bytes to reuse from previous key
+//! - `suffix_len` (4 bytes) - length of unique key suffix
+//! - `entry_type` (1 byte) - operation type (Put/Delete)
+//! - `seq_number` (8 bytes) - version number for MVCC
+//! - Value location (WiscKey mode) or value length (vanilla mode)
+//!
+//! **Variable Data:**
+//! - Key suffix (suffix_len bytes)
+//! - Value data (vanilla mode only) or omitted (WiscKey mode)
+//!
+//! # Search Algorithm
+//!
+//! Block lookups use a three-phase approach:
+//!
+//! 1. **Bloom filter check** (if enabled): Quick negative lookup
+//!    - If bloom filter says "not present", return None immediately
+//!    - If it says "maybe present", continue to phase 2
+//!
+//! 2. **Binary search on restart list**: Narrow down to a range
+//!    - Compare target key with keys at restart points only
+//!    - Find the restart point just before where the key would be
+//!    - Results in a range of at most restart_interval entries
+//!
+//! 3. **Sequential scan**: Find exact match
+//!    - Start from the identified restart point
+//!    - Reconstruct each key using prefix compression
+//!    - Compare until match found or range exhausted
+//!
+//! # Thread Safety
+//!
+//! `DataBlock` instances are immutable after creation and safe to share across threads
+//! via `Arc<DataBlock>`. Multiple readers can access the same block concurrently without
+//! locking since all operations are read-only.
+//!
+//! # Usage
+//!
+//! Data blocks are typically not created directly but through the `DataBlockBuilder`:
+//!
+//! ```rust,ignore
+//! // Reading an existing block
+//! let block = Arc::new(DataBlock::new_from_data(data, restart_interval));
+//!
+//! // Looking up a key
+//! if let Some(entry) = DataBlock::get_by_key(&block, b"user:alice") {
+//!     let value = entry.get_value();
+//! }
+//!
+//! // Iterating entries
+//! for i in 0..block.get_num_entries() {
+//!     let (key, entry) = DataBlock::get_entry_at_index(&block, i);
+//!     // Process entry...
+//! }
+//! ```
+
 use std::cmp::Ordering;
 use std::sync::Arc;
 

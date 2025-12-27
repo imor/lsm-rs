@@ -1,33 +1,84 @@
+//! Configuration parameters for the LSM-tree database.
+//!
+//! This module defines the `Params` struct which controls all configurable aspects of the
+//! database including storage paths, memory limits, compaction settings, and performance tuning.
+
 use std::path::{Path, PathBuf};
 
 use crate::{Error, level_logger::LevelLogger};
 
-/// Parameters to customize the creation of the database
+/// Configuration parameters for customizing database behavior.
+///
+/// `Params` controls all aspects of LSM-tree operation including:
+/// - Storage location and file management
+/// - Memory usage (memtable size, open file limits)
+/// - Data block organization (key block size, restart intervals)
+/// - Compaction behavior (concurrency, triggers)
+/// - Performance monitoring (level statistics logging)
+///
+/// ## Memory Management
+///
+/// - `max_memtable_size`: Larger values reduce write amplification but increase memory usage
+/// - `max_open_files`: Controls the cache size for data blocks and index blocks
+///
+/// ## Compaction Tuning
+///
+/// - `compaction_concurrency`: Higher values improve throughput but increase CPU/IO load
+/// - `seek_based_compaction`: Triggers compaction on frequently accessed tables
+///
+/// ## Data Block Tuning
+///
+/// - `block_restart_interval`: Trade-off between compression ratio and lookup speed
+/// - `max_key_block_size`: Affects memory usage and disk I/O patterns
 #[derive(Debug, Clone)]
 pub struct Params {
-    /// Where in the filesystem should the database be stored?
+    /// Filesystem path where the database files are stored.
     pub db_path: PathBuf,
-    /// Maximum size of a memtable (keys+values),
-    /// This indirectly also defines how large a value block can be
+
+    /// Maximum size of a memtable in bytes before it's flushed to disk.
+    /// Also indirectly defines the maximum value block size. Default: 5MB.
     pub max_memtable_size: usize,
-    /// How many levels does this store have (default: 5)
+
+    /// Number of levels in the LSM tree. More levels allow for larger databases
+    /// but may increase read latency. Default: 5.
     pub num_levels: usize,
-    /// How many open files should be held in memory?
+
+    /// Maximum number of files (data blocks + index blocks) to keep open simultaneously.
+    /// Higher values improve read performance but increase memory usage. Default: 1,000,000.
     pub max_open_files: usize,
-    /// Maximum number of entries in a key block
+
+    /// Maximum number of key-value entries per data block. Affects block size and
+    /// memory usage. Default: 512.
     pub max_key_block_size: usize,
-    /// How often should the full key be stored in a data block?
-    /// Larger numbers result in smaller on-disk files, but seeks will be slower
+
+    /// How many entries between restart points in a data block. Lower values improve
+    /// lookup speed but reduce compression ratio. Default: 16.
     pub block_restart_interval: u32,
-    /// Write the size of each level to a csv file
+
+    /// Optional path to a CSV file for logging level statistics (sizes, counts).
+    /// Set to `None` to disable logging.
     pub log_level_stats: Option<String>,
-    /// How many concurrent compaction tasks should there be
+
+    /// Number of concurrent compaction tasks. Higher values improve compaction throughput
+    /// but increase CPU and I/O load. Default: 4.
     pub compaction_concurrency: usize,
-    /// How many seeks (per kb) before compaction is triggered?
+
+    /// Number of seeks per kilobyte before triggering compaction on a table.
+    /// Set to `None` to disable seek-based compaction. Default: Some(10).
     pub seek_based_compaction: Option<u32>,
 }
 
 impl Params {
+    /// Validates the configuration parameters.
+    ///
+    /// Checks that all required parameters are properly configured:
+    /// - Database path is not empty
+    /// - Database path is a directory (if it exists)
+    /// - Number of levels is at least 1
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidParams` if any validation check fails.
     pub fn validate(&self) -> Result<(), Error> {
         if self.db_path.components().next().is_none() {
             return Err(Error::InvalidParams(
@@ -50,6 +101,9 @@ impl Params {
         Ok(())
     }
 
+    /// Creates a level logger if statistics logging is enabled.
+    ///
+    /// Returns a `LevelLogger` instance if `log_level_stats` is set, otherwise returns `None`.
     pub(crate) fn create_level_logger(&self) -> Option<LevelLogger> {
         self.log_level_stats
             .as_ref()
@@ -58,6 +112,18 @@ impl Params {
 }
 
 impl Default for Params {
+    /// Creates a `Params` instance with sensible default values.
+    ///
+    /// Default configuration:
+    /// - `db_path`: `./storage.lsm`
+    /// - `max_memtable_size`: 5 MB
+    /// - `num_levels`: 5
+    /// - `max_open_files`: 1,000,000
+    /// - `max_key_block_size`: 512 entries
+    /// - `block_restart_interval`: 16 entries
+    /// - `log_level_stats`: None (disabled)
+    /// - `compaction_concurrency`: 4 tasks
+    /// - `seek_based_compaction`: Some(10) seeks per KB
     fn default() -> Self {
         Self {
             db_path: Path::new("./storage.lsm").to_path_buf(),
