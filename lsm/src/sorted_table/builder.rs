@@ -35,37 +35,37 @@ use super::{SortedTable, TableId};
 pub struct TableBuilder<'a> {
     /// Unique identifier for this table.
     identifier: TableId,
-    
+
     /// Database configuration parameters.
     params: &'a Params,
-    
+
     /// Manager for data block caching and disk I/O.
     data_blocks: Arc<DataBlocks>,
-    
+
     /// The smallest key that will be stored in this table.
     min_key: Key,
-    
+
     /// The largest key that will be stored in this table.
     max_key: Key,
 
     /// The current data block being built.
     data_block: DataBlockBuilder,
-    
+
     /// Index mapping the first key of each block to its block ID.
     block_index: Vec<(Key, DataBlockId)>,
-    
+
     /// The last key added to the current block (used for prefix compression).
     last_key: Key,
-    
+
     /// Number of entries in the current block.
     block_entry_count: usize,
-    
+
     /// Total size of all finalized blocks in bytes.
     size: u64,
-    
+
     /// Counter for restart intervals (resets to 0 at restart points).
     restart_count: u32,
-    
+
     /// The first key in the current block (used for block index).
     index_key: Option<Key>,
 }

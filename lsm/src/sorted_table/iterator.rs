@@ -25,7 +25,7 @@ use crate::values::{ValueId, ValueLog};
 pub trait InternalIterator: Send {
     /// Returns `true` if the iterator has passed the end of the collection.
     fn at_end(&self) -> bool;
-    
+
     /// Advances the iterator to the next entry.
     ///
     /// # Panics
@@ -40,17 +40,17 @@ pub trait InternalIterator: Send {
     /// * `value_log` - The value log for retrieving values (WiscKey mode only)
     #[cfg(feature = "wisckey")]
     async fn get_entry(&self, value_log: &ValueLog) -> Option<EntryRef>;
-    
+
     /// Returns the current entry, or `None` if it's a deletion (tombstone).
     #[cfg(not(feature = "wisckey"))]
     fn get_entry(&self) -> Option<EntryRef>;
 
     /// Returns the key of the current entry.
     fn get_key(&self) -> &[u8];
-    
+
     /// Returns the sequence number of the current entry.
     fn get_seq_number(&self) -> SeqNumber;
-    
+
     /// Returns the type of the current entry (Put or Delete).
     fn get_entry_type(&self) -> DataEntryType;
 }
@@ -70,19 +70,19 @@ pub trait InternalIterator: Send {
 pub struct TableIterator {
     /// Current block index (-1 for reverse at end, num_blocks+1 for forward at end).
     block_pos: i64,
-    
+
     /// Byte offset or entry index within the current block.
     block_offset: u32,
-    
+
     /// The current entry's key.
     key: Key,
-    
+
     /// Handle to the current entry.
     entry: DataEntry,
-    
+
     /// Reference to the table being iterated.
     table: Arc<SortedTable>,
-    
+
     /// If `true`, iterates in reverse order; if `false`, iterates forward.
     reverse: bool,
 }
