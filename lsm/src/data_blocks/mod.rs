@@ -1,5 +1,27 @@
-/// Data blocks hold the actual contents of storted table
-/// (In the case of WiscKey the content is only the key and the value reference)
+//! Data blocks for LSM-tree sorted tables (SSTables).
+//!
+//! This module provides the core data structures and functionality for managing data blocks,
+//! which are the fundamental storage units in LSM-tree sorted tables. Data blocks store
+//! sorted key-value entries using prefix compression to minimize storage overhead.
+//!
+//! ## Architecture
+//!
+//! - **DataBlock**: In-memory representation of a data block with entries and restart list
+//! - **DataBlockBuilder**: Builder for constructing new data blocks incrementally
+//! - **DataBlocks**: Manager for the block cache and disk I/O operations
+//! - **DataEntry**: Handle to a specific entry within a block
+//!
+//! ## WiscKey Support
+//!
+//! When the "wisckey" feature is enabled, data blocks store only keys and value references
+//! (batch ID and offset) rather than the full values. This separates large values from
+//! the sorted table structure for better performance.
+//!
+//! ## Caching
+//!
+//! Data blocks are cached in memory using a sharded LRU cache for better concurrency.
+//! Cache size is controlled by the `max_open_files` parameter.
+
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -34,24 +56,42 @@ pub type DataBlockId = u64;
 /// The minimum valid data block identifier
 pub const MIN_DATA_BLOCK_ID: DataBlockId = 1;
 
-const NUM_SHARDS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
-
-/// The prefix length optimization is a key compression technique to reduce storage space in LSM trees.
-/// Instead of storing complete keys repeatedly, the data block stores only the different suffix of each key,
-/// along with how much of the previous key's prefix can be reused.
+/// A key with prefix compression metadata.
 ///
-/// For example:
+/// This structure represents a key that has been prefix-compressed relative to the previous
+/// key in a sorted sequence. It stores only the unique suffix along with the length of the
+/// shared prefix from the previous key.
 ///
-/// Key 1: "user_12345"
-/// Key 2: "user_12346" → Store prefix_len=9, suffix="6" instead of full key
-/// Key 3: "user_99999" → Store prefix_len=5, suffix="99999"
+/// ## Example
+///
+/// ```text
+/// Previous key: "user_12345"
+/// Current key:  "user_12346"
+/// PrefixedKey:  prefix_len=9, suffix="6"
+///
+/// Previous key: "user_12346"
+/// Current key:  "user_99999"
+/// PrefixedKey:  prefix_len=5, suffix="99999"
+/// ```
+///
+/// At restart points (periodic full keys), `prefix_len` is 0 and `suffix` contains the
+/// complete key.
 #[derive(Debug)]
 pub struct PrefixedKey {
+    /// Number of bytes to reuse from the previous key's prefix.
     prefix_len: u32,
+
+    /// The unique suffix of this key that differs from the previous key.
     suffix: Vec<u8>,
 }
 
 impl PrefixedKey {
+    /// Creates a new `PrefixedKey` with the specified prefix length and suffix.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix_len` - Number of bytes to reuse from the previous key
+    /// * `suffix` - The unique suffix bytes for this key
     pub fn new(prefix_len: usize, suffix: Vec<u8>) -> Self {
         Self {
             prefix_len: prefix_len as u32,
@@ -60,46 +100,78 @@ impl PrefixedKey {
     }
 }
 
-type BlockShard = LruCache<DataBlockId, Arc<DataBlock>>;
+/// The type alias for the block cache, which is an LRU cache mapping DataBlockId to an Arc of DataBlock
+type BlockCache = LruCache<DataBlockId, Arc<DataBlock>>;
 
+/// The type of operation represented by a data entry.
+///
+/// LSM-trees handle both insertions and deletions. Deletions are represented as
+/// tombstone entries rather than immediately removing the key.
 pub enum DataEntryType {
+    /// An insert or update operation.
     Put,
+
+    /// A delete operation (tombstone marker).
     Delete,
 }
 
-/// A data entry in a data block
+/// A handle to a specific key-value entry within a data block.
+///
+/// `DataEntry` provides access to an entry's metadata (sequence number, type) and value
+/// without copying the data. It holds a reference to the parent block and tracks the
+/// entry's offset and length within the block's buffer.
 #[derive(Clone)]
 pub struct DataEntry {
-    /// The block containing the entry
+    /// The block containing this entry.
     block: Arc<DataBlock>,
 
-    /// The offset of this entry in the block's buffer
+    /// Byte offset of this entry's header within the block's data buffer.
     offset: usize,
 
-    /// The length of this entry
+    /// Total length of this entry in bytes (header + key suffix + value/value reference).
     len: u32,
 }
 
+/// Result of a binary search operation within a data block.
 enum SearchResult {
+    /// An exact match was found at a restart point.
     ExactMatch(DataEntry),
+
+    /// The key might be in the range between these byte offsets, requiring sequential scan.
     Range(u32, u32),
 }
 
 impl DataEntry {
+    /// Returns a reference to this entry's header.
+    ///
+    /// The header contains metadata like prefix length, suffix length, sequence number,
+    /// entry type, and value information.
     fn get_header(&self) -> &EntryHeader {
         let header_len = std::mem::size_of::<EntryHeader>();
         let header_data = &self.block.data[self.offset..self.offset + header_len];
         EntryHeader::ref_from_bytes(header_data).expect("Failed to read entry header")
     }
 
+    /// Returns the sequence number of this entry.
+    ///
+    /// The sequence number is used for versioning and MVCC. Higher values indicate
+    /// more recent writes.
     pub fn get_sequence_number(&self) -> u64 {
         self.get_header().seq_number
     }
 
+    /// Returns the byte offset immediately after this entry.
+    ///
+    /// This value can be used as the starting offset for reading the next entry.
     pub fn len(&self) -> u32 {
         self.len
     }
 
+    /// Returns the type of this entry (Put or Delete).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry type is not a recognized operation.
     pub fn get_type(&self) -> DataEntryType {
         let header = self.get_header();
 
@@ -112,6 +184,14 @@ impl DataEntry {
         }
     }
 
+    /// Returns the value data for this entry (non-WiscKey mode only).
+    ///
+    /// For Put entries, returns a slice containing the value bytes stored inline with the key.
+    /// For Delete entries (tombstones), returns `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry type is not a recognized operation.
     #[cfg(not(feature = "wisckey"))]
     pub fn get_value(&self) -> Option<&[u8]> {
         let header = self.get_header();
@@ -128,6 +208,14 @@ impl DataEntry {
         }
     }
 
+    /// Returns the value reference for this entry (WiscKey mode only).
+    ///
+    /// Returns a `ValueId` (batch ID and offset) pointing to where the actual value is stored
+    /// in the value log. For Delete entries, returns `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry type is not a recognized operation.
     #[cfg(feature = "wisckey")]
     pub fn get_value_id(&self) -> Option<ValueId> {
         let header = self.get_header();
@@ -141,6 +229,10 @@ impl DataEntry {
         }
     }
 
+    /// Converts this data entry into an `EntryRef` for non-WiscKey mode.
+    ///
+    /// For Put entries, wraps this entry in an `EntryRef::SortedTable` variant.
+    /// For Delete entries, returns `None`.
     #[cfg(not(feature = "wisckey"))]
     pub fn get_entry_ref(self) -> Option<EntryRef> {
         match self.get_type() {
@@ -152,6 +244,15 @@ impl DataEntry {
         }
     }
 
+    /// Converts this data entry into an `EntryRef` for WiscKey mode.
+    ///
+    /// For Put entries, retrieves the value reference from the value log and wraps both
+    /// this entry and the value reference in an `EntryRef::SortedTable` variant.
+    /// For Delete entries, returns `None`.
+    ///
+    /// # Arguments
+    ///
+    /// * `value_log` - The value log to retrieve the value reference from
     #[cfg(feature = "wisckey")]
     pub async fn get_entry_ref(self, value_log: &ValueLog) -> Option<EntryRef> {
         match self.get_type() {
@@ -171,24 +272,60 @@ impl DataEntry {
     }
 }
 
-/// Keeps track of all in-memory data blocks
+/// Manager for data blocks with caching and disk I/O.
+///
+/// `DataBlocks` maintains a sharded LRU cache of data blocks in memory and handles loading
+/// blocks from disk on cache misses. It also provides factory methods for creating new blocks
+/// through builders.
+///
+/// ## Sharding
+///
+/// The block cache is split into multiple shards to reduce lock contention. Each shard
+/// has its own LRU cache and lock, allowing concurrent access to different blocks.
+///
+/// ## Disk Layout
+///
+/// Data blocks are stored as individual files with names like `key00000001.data` in the
+/// database directory.
 pub struct DataBlocks {
+    /// Database configuration parameters.
     params: Arc<Params>,
-    block_caches: Vec<Mutex<BlockShard>>,
+
+    /// Sharded LRU caches for storing recently accessed data blocks in memory.
+    block_caches: Vec<Mutex<BlockCache>>,
+
+    /// Manifest for generating unique block IDs and tracking metadata.
     manifest: Arc<Manifest>,
 }
 
 impl DataBlocks {
+    /// The number of shards to split the block cache into for better concurrency.
+    const BLOCK_CACHE_NUM_SHARDS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
+
+    /// Creates a new `DataBlocks` manager with sharded LRU caches.
+    ///
+    /// The total cache capacity is split evenly across shards. Each shard gets
+    /// `(max_open_files / 2) / BLOCK_CACHE_NUM_SHARDS` entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Database configuration parameters
+    /// * `manifest` - Manifest for block ID generation and metadata
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_open_files` is too small to support the number of shards.
     pub fn new(params: Arc<Params>, manifest: Arc<Manifest>) -> Self {
         let max_data_files = NonZeroUsize::new(params.max_open_files / 2)
             .expect("Max open files needs to be greater than 2");
 
-        let shard_size = NonZeroUsize::new(max_data_files.get() / NUM_SHARDS)
-            .expect("Not enough open files to support the number of shards");
+        let shard_size =
+            NonZeroUsize::new(max_data_files.get() / Self::BLOCK_CACHE_NUM_SHARDS.get())
+                .expect("Not enough open files to support the number of shards");
 
-        let mut block_caches = Vec::with_capacity(NUM_SHARDS.get());
-        for _ in 0..NUM_SHARDS.get() {
-            block_caches.push(Mutex::new(BlockShard::new(shard_size)));
+        let mut block_caches = Vec::with_capacity(Self::BLOCK_CACHE_NUM_SHARDS.get());
+        for _ in 0..Self::BLOCK_CACHE_NUM_SHARDS.get() {
+            block_caches.push(Mutex::new(BlockCache::new(shard_size)));
         }
 
         Self {
@@ -198,26 +335,49 @@ impl DataBlocks {
         }
     }
 
+    /// Maps a block ID to its corresponding cache shard index.
+    ///
+    /// Uses simple modulo hashing to distribute blocks across shards.
     #[inline]
     fn block_to_shard_id(block_id: DataBlockId) -> usize {
-        (block_id as usize) % NUM_SHARDS
+        (block_id as usize) % Self::BLOCK_CACHE_NUM_SHARDS
     }
 
-    /// The path where the block with the given id
-    /// will be stored at.
+    /// Returns the filesystem path where a block is stored.
+    ///
+    /// Blocks are stored as `keyXXXXXXXX.data` where X is the zero-padded block ID.
     #[inline]
     fn get_file_path(&self, block_id: &DataBlockId) -> std::path::PathBuf {
         self.params.db_path.join(format!("key{block_id:08}.data"))
     }
 
-    /// Start creation of a new block
+    /// Creates a new data block builder.
+    ///
+    /// The builder can be used to incrementally construct a data block by adding entries.
+    /// Call `finish()` on the builder to write the block to disk and cache it.
+    ///
+    /// # Arguments
+    ///
+    /// * `self_ptr` - Arc reference to this DataBlocks manager
     #[tracing::instrument(skip(self_ptr))]
     pub fn build_block(self_ptr: Arc<DataBlocks>) -> DataBlockBuilder {
         DataBlockBuilder::new(self_ptr)
     }
 
-    /// Get a block by its id
-    /// Will either return the block from cache or load it from disk
+    /// Retrieves a data block by its ID.
+    ///
+    /// First checks the appropriate cache shard for the block. On a cache miss, loads the
+    /// block from disk, caches it, and returns it. The lock is not held during disk I/O
+    /// for better concurrency, though this may result in loading the same block multiple
+    /// times concurrently in rare cases.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier of the block to retrieve
+    ///
+    /// # Panics
+    ///
+    /// Panics if the block file cannot be read from disk.
     #[tracing::instrument(skip(self))]
     pub async fn get_block(&self, id: &DataBlockId) -> Arc<DataBlock> {
         let shard_id = Self::block_to_shard_id(*id);
@@ -227,7 +387,7 @@ impl DataBlocks {
             return block.clone();
         }
 
-        // Do not hold the lock while loading form disk for better concurrency
+        // Do not hold the lock while loading from disk for better concurrency
         // Worst case this means we load the same block multiple times...
         let file_path = self.get_file_path(id);
         log::trace!("Loading data block from disk at {file_path:?}");
