@@ -344,7 +344,7 @@ impl LevelMetadata {
 ///
 /// ```no_run
 /// use std::sync::Arc;
-/// use lsm::params::Params;
+/// use lsm::Params;
 /// use lsm::manifest::Manifest;
 ///
 /// # async fn example() {

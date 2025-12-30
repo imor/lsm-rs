@@ -7,7 +7,11 @@ all: tests lint
 tests: sync-tests async-tests \
        wisckey-tests \
        wisckey-no-compression-tests \
-       wisckey-sync-tests
+       wisckey-sync-tests \
+       doc-tests
+
+doc-tests:
+    cargo test --doc
 
 sync-tests:
     cd sync && just default-tests

@@ -46,6 +46,7 @@
 //!
 //! ```no_run
 //! use lsm::{Database, StartMode, WriteBatch};
+//! use futures::StreamExt;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), lsm::Error> {
@@ -57,7 +58,7 @@
 //!
 //!     // Retrieve the value
 //!     if let Some(entry) = db.get(b"hello").await? {
-//!         println!("Value: {:?}", entry.value());
+//!         println!("Value: {:?}", entry.get_value());
 //!     }
 //!
 //!     // Batch write multiple keys
@@ -68,8 +69,8 @@
 //!
 //!     // Iterate over a range
 //!     let mut iter = db.range_iter(b"key1", b"key3").await;
-//!     while let Some(entry) = iter.next().await {
-//!         println!("{:?}: {:?}", entry.key(), entry.value());
+//!     while let Some((key, entry)) = iter.next().await {
+//!         println!("{:?}: {:?}", key, entry.get_value());
 //!     }
 //!
 //!     // Graceful shutdown

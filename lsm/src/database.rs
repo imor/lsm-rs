@@ -28,7 +28,7 @@
 //!
 //! // Get the value back
 //! if let Some(entry) = db.get(b"key").await? {
-//!     println!("Value: {:?}", entry.value());
+//!     println!("Value: {:?}", entry.get_value());
 //! }
 //!
 //! // Delete a key
@@ -78,6 +78,7 @@ use std::sync::Arc;
 ///
 /// ```no_run
 /// use lsm::{Database, StartMode, WriteBatch};
+/// use futures::StreamExt;
 ///
 /// # async fn example() -> Result<(), lsm::Error> {
 /// let db = Database::new(StartMode::CreateOrOpen).await?;
@@ -93,8 +94,8 @@ use std::sync::Arc;
 ///
 /// // Range iteration
 /// let mut iter = db.range_iter(b"key1", b"key3").await;
-/// while let Some(entry) = iter.next().await {
-///     println!("{:?}: {:?}", entry.key(), entry.value());
+/// while let Some((key, entry)) = iter.next().await {
+///     println!("{:?}: {:?}", key, entry.get_value());
 /// }
 ///
 /// db.stop().await?;
@@ -200,7 +201,7 @@ impl Database {
     /// # use lsm::Database;
     /// # async fn example(db: &Database) -> Result<(), lsm::Error> {
     /// match db.get(b"my_key").await? {
-    ///     Some(entry) => println!("Found: {:?}", entry.value()),
+    ///     Some(entry) => println!("Found: {:?}", entry.get_value()),
     ///     None => println!("Key not found"),
     /// }
     /// # Ok(())
@@ -378,10 +379,11 @@ impl Database {
     ///
     /// ```no_run
     /// # use lsm::Database;
+    /// # use futures::StreamExt;
     /// # async fn example(db: &Database) -> Result<(), lsm::Error> {
     /// let mut iter = db.iter().await;
-    /// while let Some(entry) = iter.next().await {
-    ///     println!("{:?}: {:?}", entry.key(), entry.value());
+    /// while let Some((key, entry)) = iter.next().await {
+    ///     println!("{:?}: {:?}", key, entry.get_value());
     /// }
     /// # Ok(())
     /// # }
@@ -414,11 +416,12 @@ impl Database {
     ///
     /// ```no_run
     /// # use lsm::Database;
+    /// # use futures::StreamExt;
     /// # async fn example(db: &Database) -> Result<(), lsm::Error> {
     /// // Iterate over keys from "a" to "m" (not including "m")
     /// let mut iter = db.range_iter(b"a", b"m").await;
-    /// while let Some(entry) = iter.next().await {
-    ///     println!("{:?}", entry.key());
+    /// while let Some((key, _entry)) = iter.next().await {
+    ///     println!("{:?}", key);
     /// }
     /// # Ok(())
     /// # }
@@ -452,11 +455,12 @@ impl Database {
     ///
     /// ```no_run
     /// # use lsm::Database;
+    /// # use futures::StreamExt;
     /// # async fn example(db: &Database) -> Result<(), lsm::Error> {
     /// // Iterate backwards from "z" to "m" (not including "m")
     /// let mut iter = db.reverse_range_iter(b"z", b"m").await;
-    /// while let Some(entry) = iter.next().await {
-    ///     println!("{:?}", entry.key());
+    /// while let Some((key, _entry)) = iter.next().await {
+    ///     println!("{:?}", key);
     /// }
     /// # Ok(())
     /// # }
