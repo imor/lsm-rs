@@ -81,12 +81,12 @@ pub struct RecoveryResult {
     /// This is the position immediately after the last successfully parsed WAL entry.
     /// New write operations will continue from this position.
     pub new_position: usize,
-    
+
     /// The total number of log entries successfully recovered and replayed.
     ///
     /// This count includes all entry types (writes, deletes, value deletions, etc.).
     pub entries_recovered: usize,
-    
+
     /// List of value batches marked for deletion during recovery (Wisckey only).
     ///
     /// These batches were marked for deletion in the WAL but may not have been
@@ -112,26 +112,45 @@ impl WalReader {
     ///
     /// # Errors
     ///
+    /// Returns `Ok(None)` if the WAL file doesn't exist, indicating that all WAL entries
+    /// have been flushed to disk and the WAL was pruned. Returns an error only if
+    /// the file exists but cannot be read.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(reader))`: WAL file found, ready for recovery
+    /// - `Ok(None)`: No WAL file exists (all data was flushed and pruned)
+    ///
+    /// # Errors
+    ///
     /// Returns an error if:
-    /// - The database directory does not exist
-    /// - The WAL file at the calculated position cannot be read
-    /// - File I/O operations fail
-    pub async fn new(db_path: PathBuf, start_position: usize) -> Result<Self, Error> {
+    /// - The WAL file exists but cannot be read
+    /// - File I/O operations fail unexpectedly
+    pub async fn new(db_path: PathBuf, start_position: usize) -> Result<Option<Self>, Error> {
         let position = start_position;
         let file_num = position / PAGE_SIZE;
 
         let file_path = WalWriter::get_file_path(&db_path, file_num);
         log::trace!("Opening next log file at {file_path:?}");
 
-        let current_page = disk::read_uncompressed(&file_path, 0)
-            .await
-            .map_err(|err| Error::from_io_error("Failed to open WAL file", err))?;
+        let current_page = match disk::read_uncompressed(&file_path, 0).await {
+            Ok(page) => page,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // WAL file doesn't exist - this is normal when all data has been
+                // flushed to sorted tables and the WAL was pruned
+                log::debug!("No WAL file found at {file_path:?}, assuming all data was flushed");
+                return Ok(None);
+            }
+            Err(err) => {
+                return Err(Error::from_io_error("Failed to open WAL file", err));
+            }
+        };
 
-        Ok(Self {
+        Ok(Some(Self {
             current_page,
             position,
             db_path,
-        })
+        }))
     }
 
     /// Runs the recovery process, replaying all WAL entries into the memtable and value index.

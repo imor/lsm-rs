@@ -421,9 +421,21 @@ impl WriteAheadLog {
         // This reads the file(s) in the current thread
         // because we cannot send it between threads easily
 
-        let mut reader = WalReader::new(params.db_path.clone(), start_position).await?;
-
-        let result = reader.run(memtable, value_index).await?;
+        let result = match WalReader::new(params.db_path.clone(), start_position).await? {
+            Some(mut reader) => {
+                // WAL file exists, replay entries
+                reader.run(memtable, value_index).await?
+            }
+            None => {
+                // No WAL file exists - all data was already flushed and WAL was pruned
+                // Start fresh from the current position
+                RecoveryResult {
+                    new_position: start_position,
+                    entries_recovered: 0,
+                    value_batches_to_delete: Vec::new(),
+                }
+            }
+        };
 
         let status = LogStatus::new(result.new_position, start_position);
         let inner = Arc::new(LogInner::new(status));
@@ -476,9 +488,20 @@ impl WriteAheadLog {
         // This reads the file(s) in the current thread
         // because we cannot send stuff between threads easily
 
-        let mut reader = WalReader::new(params.db_path.clone(), start_position).await?;
-
-        let result = reader.run(memtable).await?;
+        let result = match WalReader::new(params.db_path.clone(), start_position).await? {
+            Some(mut reader) => {
+                // WAL file exists, replay entries
+                reader.run(memtable).await?
+            }
+            None => {
+                // No WAL file exists - all data was already flushed and WAL was pruned
+                // Start fresh from the current position
+                RecoveryResult {
+                    new_position: start_position,
+                    entries_recovered: 0,
+                }
+            }
+        };
 
         let status = LogStatus::new(result.new_position, start_position);
         let inner = Arc::new(LogInner::new(status));
