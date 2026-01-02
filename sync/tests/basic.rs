@@ -48,7 +48,7 @@ fn iterate() {
     let (_tmpdir, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -78,7 +78,7 @@ fn range_iterate() {
     let (_tmpdir, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -114,7 +114,7 @@ fn range_iterate_reverse() {
     let (_tmpdir, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -152,7 +152,7 @@ fn range_iterate_empty() {
     const COUNT: u64 = 5_000;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -179,7 +179,7 @@ fn get_put_many() {
     let (_tmpdir, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -203,7 +203,7 @@ fn get_put_delete_many() {
     let (_tmpdir, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -230,7 +230,7 @@ fn override_many() {
     let (_tmpdir, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -262,7 +262,7 @@ fn override_subset() {
     let (_tmpdir, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..NCOUNT {
         let key = format!("key_{pos}").into_bytes();

@@ -219,7 +219,7 @@ impl IndexPage {
     ///
     /// # Note
     ///
-    /// Changes are not persisted until `sync()` is called.
+    /// Changes are not persisted until `flush()` is called.
     pub fn expand(&mut self, num_entries: usize) -> bool {
         assert!(!self.sealed);
 
@@ -269,7 +269,7 @@ impl IndexPage {
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
-    pub async fn sync(&mut self, path: &Path) -> Result<bool, Error> {
+    pub async fn flush(&mut self, path: &Path) -> Result<bool, Error> {
         if !self.dirty {
             return Ok(false);
         }
@@ -412,7 +412,7 @@ impl IndexPage {
     ///
     /// # Note
     ///
-    /// Changes are not persisted until `sync()` is called.
+    /// Changes are not persisted until `flush()` is called.
     pub fn mark_value_as_deleted(&mut self, vid: ValueId) -> u16 {
         let (start_pos, end_pos) = self.get_batch_range(vid.0);
 
@@ -565,7 +565,7 @@ impl ValueIndex {
 
             let (_, page) = pages.back_mut().unwrap();
             let fpath = obj.get_page_file_path(&page.get_identifier());
-            page.sync(&fpath).await?;
+            page.flush(&fpath).await?;
         }
 
         Ok(obj)
@@ -609,14 +609,14 @@ impl ValueIndex {
         Ok(obj)
     }
 
-    /// Syncs all dirty index pages to disk.
+    /// Flushes all dirty index pages to disk.
     ///
     /// Iterates through all pages and writes those with pending changes.
     ///
     /// # Errors
     ///
     /// Returns an error if any page cannot be written to disk.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn flush(&self) -> Result<(), Error> {
         let mut count = 0;
         let mut pages = self.pages.write().await;
 
@@ -626,7 +626,7 @@ impl ValueIndex {
             }
 
             let path = self.get_page_file_path(&page.get_identifier());
-            let updated = page.sync(&path).await?;
+            let updated = page.flush(&path).await?;
             assert!(updated);
             count += 1;
         }
@@ -764,7 +764,7 @@ impl ValueIndex {
 
         // Persist changes to disk
         let path = self.get_page_file_path(&p.get_identifier());
-        p.sync(&path).await?;
+        p.flush(&path).await?;
         Ok(())
     }
 

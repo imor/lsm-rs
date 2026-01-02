@@ -66,7 +66,7 @@ async fn reopen_wal(params: Arc<Params>, offset: usize) -> (Memtable, WriteAhead
 async fn empty_sync() {
     let (tempdir, _, wal) = test_init().await;
 
-    assert_eq!(wal.inner.status.read().sync_pos, 0);
+    assert_eq!(wal.inner.status.read().flush_pos, 0);
     assert_eq!(wal.inner.status.read().write_pos, 0);
 
     test_cleanup(tempdir, wal).await;
@@ -81,9 +81,9 @@ async fn write_and_sync() {
     let op = WriteOp::Put(key.clone(), value.clone());
 
     wal.store([LogEntry::Write(&op)].into_iter()).await.unwrap();
-    wal.sync().await.unwrap();
+    wal.flush().await.unwrap();
 
-    assert_eq!(wal.inner.status.read().sync_pos, 22);
+    assert_eq!(wal.inner.status.read().flush_pos, 22);
     assert_eq!(wal.inner.status.read().write_pos, 22);
 
     test_cleanup(tempdir, wal).await;
@@ -98,9 +98,9 @@ async fn write_large_value() {
     let op = WriteOp::Put(key.clone(), value.clone());
 
     wal.store([LogEntry::Write(&op)].into_iter()).await.unwrap();
-    wal.sync().await.unwrap();
+    wal.flush().await.unwrap();
 
-    assert_eq!(wal.inner.status.read().sync_pos, 8212);
+    assert_eq!(wal.inner.status.read().flush_pos, 8212);
     assert_eq!(wal.inner.status.read().write_pos, 8212);
 
     test_cleanup(tempdir, wal).await;
@@ -115,11 +115,11 @@ async fn reopen() {
     let op = WriteOp::Put(key.clone(), value.clone());
 
     wal.store([LogEntry::Write(&op)].into_iter()).await.unwrap();
-    wal.sync().await.unwrap();
+    wal.flush().await.unwrap();
     drop(wal);
 
     let (memtable, wal) = reopen_wal(params, 0).await;
-    assert_eq!(wal.inner.status.read().sync_pos, 22);
+    assert_eq!(wal.inner.status.read().flush_pos, 22);
     assert_eq!(wal.inner.status.read().write_pos, 22);
 
     let entry = memtable.get(&key).unwrap();
@@ -145,13 +145,13 @@ async fn reopen_with_offset1() {
     wal.store([LogEntry::Write(&op2)].into_iter())
         .await
         .unwrap();
-    wal.sync().await.unwrap();
+    wal.flush().await.unwrap();
 
     drop(wal);
 
     let (memtable, wal) = reopen_wal(params, 22).await;
 
-    assert_eq!(wal.inner.status.read().sync_pos, 45);
+    assert_eq!(wal.inner.status.read().flush_pos, 45);
     assert_eq!(wal.inner.status.read().write_pos, 45);
 
     assert!(memtable.get(&key1).is_none());
@@ -178,7 +178,7 @@ async fn reopen_with_offset_and_cleanup1() {
     wal.store([LogEntry::Write(&op2)].into_iter())
         .await
         .unwrap();
-    wal.sync().await.unwrap();
+    wal.flush().await.unwrap();
 
     let offset = 22;
     wal.prune_wal(offset).await;
@@ -186,7 +186,7 @@ async fn reopen_with_offset_and_cleanup1() {
 
     let (memtable, wal) = reopen_wal(params, offset).await;
 
-    assert_eq!(wal.inner.status.read().sync_pos, 45);
+    assert_eq!(wal.inner.status.read().flush_pos, 45);
     assert_eq!(wal.inner.status.read().write_pos, 45);
 
     assert!(memtable.get(&key1).is_none());
@@ -214,7 +214,7 @@ async fn reopen_with_offset_and_cleanup2() {
     wal.store([LogEntry::Write(&op2)].into_iter())
         .await
         .unwrap();
-    wal.sync().await.unwrap();
+    wal.flush().await.unwrap();
 
     let offset = 8212;
     wal.prune_wal(offset).await;
@@ -223,7 +223,7 @@ async fn reopen_with_offset_and_cleanup2() {
 
     let (memtable, wal) = reopen_wal(params, offset).await;
 
-    assert_eq!(wal.inner.status.read().sync_pos, 8235);
+    assert_eq!(wal.inner.status.read().flush_pos, 8235);
     assert_eq!(wal.inner.status.read().write_pos, 8235);
 
     assert!(memtable.get(&key1).is_none());
@@ -251,13 +251,13 @@ async fn reopen_with_offset2() {
     wal.store([LogEntry::Write(&op2)].into_iter())
         .await
         .unwrap();
-    wal.sync().await.unwrap();
+    wal.flush().await.unwrap();
 
     drop(wal);
 
     let (memtable, wal) = reopen_wal(params, 8212).await;
 
-    assert_eq!(wal.inner.status.read().sync_pos, 8235);
+    assert_eq!(wal.inner.status.read().flush_pos, 8235);
     assert_eq!(wal.inner.status.read().write_pos, 8235);
 
     assert!(memtable.get(&key1).is_none());
@@ -276,13 +276,13 @@ async fn reopen_large_file() {
     let op = WriteOp::Put(key.clone(), value.clone());
 
     wal.store([LogEntry::Write(&op)].into_iter()).await.unwrap();
-    wal.sync().await.unwrap();
+    wal.flush().await.unwrap();
 
     drop(wal);
 
     let (memtable, wal) = reopen_wal(params, 0).await;
 
-    assert_eq!(wal.inner.status.read().sync_pos, 8212);
+    assert_eq!(wal.inner.status.read().flush_pos, 8212);
     assert_eq!(wal.inner.status.read().write_pos, 8212);
 
     let entry = memtable.get(&key).unwrap();

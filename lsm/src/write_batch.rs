@@ -24,7 +24,7 @@ use crate::{Key, Value, memtable::Memtable};
 pub enum WriteOp {
     /// Insert or update a key-value pair.
     Put(Key, Value),
-    
+
     /// Delete a key (creates a tombstone marker).
     Delete(Key),
 }
@@ -59,7 +59,7 @@ pub struct WriteBatch {
 impl WriteOp {
     /// Operation type constant for Put operations.
     pub(crate) const PUT_OP: u8 = 1;
-    
+
     /// Operation type constant for Delete operations.
     pub(crate) const DELETE_OP: u8 = 2;
 
@@ -150,14 +150,14 @@ impl Default for WriteBatch {
 #[derive(Debug, Clone)]
 pub struct WriteOptions {
     /// Should the call block until it is guaranteed to be written to disk?
-    pub sync: bool,
+    pub flush: bool,
 }
 
 /// Creates a new `WriteOptions` instance with default settings.
 impl WriteOptions {
     /// Creates a new `WriteOptions` with default values.
     pub const fn new() -> Self {
-        Self { sync: true }
+        Self { flush: true }
     }
 }
 

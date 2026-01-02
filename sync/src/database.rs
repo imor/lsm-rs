@@ -70,8 +70,7 @@ impl Database {
     pub fn synchronize(&self) -> Result<(), Error> {
         let inner = &*self.inner;
 
-        self.tokio_rt
-            .block_on(async move { inner.synchronize().await })
+        self.tokio_rt.block_on(async move { inner.flush().await })
     }
 
     /// Store entry

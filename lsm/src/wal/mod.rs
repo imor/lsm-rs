@@ -41,15 +41,15 @@
 //! # Durability Guarantees
 //!
 //! - Writes are buffered in memory for performance
-//! - Explicit `sync()` calls ensure data is persisted to disk via `fsync`
+//! - Explicit `flush()` calls ensure data is persisted to disk via `fsync`
 //! - The WAL guarantees write ordering: entries are written in strict sequential order
-//! - After a successful `sync()`, all preceding writes are guaranteed to survive a crash
+//! - After a successful `flush()`, all preceding writes are guaranteed to survive a crash
 //!
 //! # Lifecycle
 //!
 //! 1. **Creation**: WAL is initialized when the database opens
 //! 2. **Writing**: Operations are logged as they occur
-//! 3. **Syncing**: Periodic or explicit syncs ensure durability
+//! 3. **Flushing**: Periodic or explicit flushes ensure durability
 //! 4. **Pruning**: After memtable flush, old WAL entries are deleted
 //! 5. **Shutdown**: Graceful shutdown ensures all pending writes complete
 
@@ -180,7 +180,7 @@ const PAGE_SIZE: usize = 4 * 1024;
 /// Internal state of the write-ahead log shared between the writer task and WAL object.
 ///
 /// This structure tracks the progress of write operations through various stages:
-/// from being queued, to being written to disk, to being synced, and finally pruned.
+/// from being queued, to being written to disk, to being flushed, and finally pruned.
 ///
 /// # Thread Safety
 ///
@@ -193,7 +193,7 @@ const PAGE_SIZE: usize = 4 * 1024;
 /// # Invariants
 ///
 /// The following invariants must always hold:
-/// - `sync_pos <= write_pos <= queue_pos`: Synced data must be written, written data must be queued
+/// - `flush_pos <= write_pos <= queue_pos`: Flushed data must be written, written data must be queued
 /// - `prune_pos <= can_prune_pos`: We can only prune up to what's been marked for pruning
 ///
 struct LogStatus {
@@ -206,14 +206,14 @@ struct LogStatus {
     /// Absolute byte position of the last write operation fulfilled to disk.
     ///
     /// This represents how much data has actually been written to the WAL file,
-    /// though not necessarily synced. Updated by the writer task after writes complete.
+    /// though not necessarily flushed. Updated by the writer task after writes complete.
     write_pos: usize,
 
     /// Absolute byte position of the last fsync operation.
     ///
     /// Data up to this position is guaranteed to be persisted to disk and will
     /// survive a crash. Updated after successful fsync operations.
-    sync_pos: usize,
+    flush_pos: usize,
 
     /// Queue of pending data buffers to be written.
     ///
@@ -235,8 +235,8 @@ struct LogStatus {
 
     /// Flag indicating that an fsync has been requested.
     ///
-    /// Set when `sync()` is called, cleared after the sync completes.
-    sync_requested: bool,
+    /// Set when `flush()` is called, cleared after the flush completes.
+    flush_requested: bool,
 
     /// Flag indicating that the WAL should shut down gracefully.
     ///
@@ -256,11 +256,11 @@ impl LogStatus {
         Self {
             queue_pos: position,
             write_pos: position,
-            sync_pos: position,
+            flush_pos: position,
             prune_pos: start_position,
             can_prune_pos: start_position,
             queue: vec![],
-            sync_requested: false,
+            flush_requested: false,
             stop_requested: false,
         }
     }
@@ -278,12 +278,12 @@ struct LogInner {
 
     /// Notification mechanism for the writer task.
     ///
-    /// Notified when new data is queued, sync is requested, or shutdown is initiated.
+    /// Notified when new data is queued, flush is requested, or shutdown is initiated.
     queue_cond: Notify,
 
     /// Notification mechanism for waiting operations.
     ///
-    /// Notified when writes complete, syncs finish, or pruning occurs.
+    /// Notified when writes complete, flushes finish, or pruning occurs.
     write_cond: Notify,
 }
 
@@ -315,7 +315,7 @@ impl LogInner {
 ///
 /// The WAL provides configurable durability guarantees:
 /// - **Async writes**: Operations are buffered and written asynchronously for performance
-/// - **Explicit sync**: Call `sync()` to ensure all buffered data is persisted to disk
+/// - **Explicit flush**: Call `flush()` to ensure all buffered data is persisted to disk
 /// - **Ordered writes**: All operations are written in strict sequential order
 ///
 /// # Background Writer
@@ -336,7 +336,7 @@ impl LogInner {
 /// let position = wal.store(entries.into_iter()).await?;
 ///
 /// // Ensure durability
-/// wal.sync().await?;
+/// wal.flush().await?;
 ///
 /// // After memtable flush, prune old entries
 /// wal.prune_wal(position).await;
@@ -564,7 +564,7 @@ impl WriteAheadLog {
     ///
     /// This is the primary method for logging write operations. Each entry is serialized
     /// according to the WAL entry format and added to the write queue. The method waits
-    /// until the data has been written to the OS buffer (but not necessarily synced to disk).
+    /// until the data has been written to the OS buffer (but not necessarily flushed to disk).
     ///
     /// # Entry Serialization Format
     ///
@@ -597,7 +597,7 @@ impl WriteAheadLog {
     /// # Note
     ///
     /// This method only guarantees that data is written to the OS buffer. For durability
-    /// guarantees that survive crashes, call `sync()` after this method.
+    /// guarantees that survive crashes, call `flush()` after this method.
     #[tracing::instrument(skip(self, entries))]
     pub async fn store(&self, entries: impl Iterator<Item = LogEntry<'_>>) -> Result<usize, Error> {
         let mut writes = vec![];
@@ -672,7 +672,7 @@ impl WriteAheadLog {
     /// Waits until data has been written to the WAL up to the specified position.
     ///
     /// This ensures that queued data has been written to the OS buffer, though
-    /// not necessarily synced to disk.
+    /// not necessarily flushed to disk.
     ///
     /// # Arguments
     ///
@@ -684,7 +684,7 @@ impl WriteAheadLog {
         .await
     }
 
-    /// Waits until data has been synced to disk up to the specified position.
+    /// Waits until data has been flushed to disk up to the specified position.
     ///
     /// This ensures that data has been persisted via fsync and will survive
     /// a crash or power failure.
@@ -692,9 +692,9 @@ impl WriteAheadLog {
     /// # Arguments
     ///
     /// * `position` - The byte position to wait for
-    async fn wait_for_sync_pos(&self, position: usize) {
+    async fn wait_for_flush_pos(&self, position: usize) {
         self.wait_for_condition(position, |status: &LogStatus, position: usize| -> bool {
-            status.sync_pos > position
+            status.flush_pos > position
         })
         .await
     }
@@ -807,43 +807,43 @@ impl WriteAheadLog {
     /// After this method returns successfully:
     /// - All writes queued before the sync are guaranteed to be on disk
     /// - The data will be available during recovery after a crash
-    /// - The sync position is updated to reflect the persisted data
+    /// - The flush position is updated to reflect the persisted data
     ///
     /// # Performance Considerations
     ///
     /// Calling `fsync` is expensive as it requires waiting for the OS and disk hardware
     /// to complete the write. Consider:
-    /// - Batching multiple writes before syncing
-    /// - Only syncing when durability is critical
+    /// - Batching multiple writes before flusing
+    /// - Only flushing when durability is critical
     /// - Using async writes for better throughput when some data loss is acceptable
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` when the sync operation completes successfully.
+    /// Returns `Ok(())` when the flush operation completes successfully.
     ///
     /// # Errors
     ///
     /// Currently does not return errors, but the signature allows for future error cases
     /// such as I/O failures during fsync.
     #[tracing::instrument(skip(self))]
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn flush(&self) -> Result<(), Error> {
         let last_pos = {
             let mut status = self.inner.status.write();
 
-            // Nothing to sync?
-            if status.sync_pos == status.write_pos {
+            // Nothing to flush?
+            if status.flush_pos == status.write_pos {
                 return Ok(());
             }
 
-            assert!(status.sync_pos < status.write_pos);
+            assert!(status.flush_pos < status.write_pos);
 
-            status.sync_requested = true;
+            status.flush_requested = true;
             self.inner.queue_cond.notify_waiters();
 
-            status.sync_pos
+            status.flush_pos
         };
 
-        self.wait_for_sync_pos(last_pos).await;
+        self.wait_for_flush_pos(last_pos).await;
 
         Ok(())
     }

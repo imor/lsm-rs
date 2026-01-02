@@ -92,7 +92,7 @@ pub struct ValueLog {
 
     /// Database configuration parameters.
     params: Arc<Params>,
-    
+
     /// Manifest for ID generation and metadata.
     manifest: Arc<Manifest>,
 }
@@ -103,10 +103,10 @@ pub struct ValueLog {
 pub struct ValueRef {
     /// The batch containing this value.
     batch: Arc<ValueBatch>,
-    
+
     /// Byte offset within the batch where the value starts.
     offset: usize,
-    
+
     /// Length of the value in bytes.
     length: usize,
 }
@@ -444,14 +444,14 @@ impl ValueLog {
         Ok(ValueBatch::get_ref(batch, offset))
     }
 
-    /// Syncs all dirty index pages to disk.
+    /// Flushes all dirty index pages to disk.
     ///
     /// Ensures all pending index updates are persisted.
     ///
     /// # Errors
     ///
     /// Returns an error if any index page cannot be written.
-    pub async fn sync(&self) -> Result<(), Error> {
-        self.index.sync().await
+    pub async fn flush(&self) -> Result<(), Error> {
+        self.index.flush().await
     }
 }

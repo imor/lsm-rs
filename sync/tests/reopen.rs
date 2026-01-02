@@ -60,7 +60,7 @@ fn get_put_many() {
     let (_tmpdir, params, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -93,7 +93,7 @@ fn get_put_large() {
     let (_tmpdir, params, database) = test_init();
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();

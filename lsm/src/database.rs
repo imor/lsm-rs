@@ -258,7 +258,7 @@ impl Database {
     /// Ensures all pending writes are flushed to disk.
     ///
     /// This method is only necessary if you've performed writes with
-    /// `sync=false` in [`WriteOptions`]. It forces a synchronous flush
+    /// `flush=false` in [`WriteOptions`]. It forces a synchronous flush
     /// of all buffered data to persistent storage.
     ///
     /// # Durability
@@ -271,7 +271,7 @@ impl Database {
     /// ```no_run
     /// # use lsm::{Database, WriteOptions};
     /// # async fn example(db: &Database) -> Result<(), lsm::Error> {
-    /// let opts = WriteOptions { sync: false };
+    /// let opts = WriteOptions { flush: false };
     /// db.put_opts(b"key".to_vec(), b"value".to_vec(), &opts).await?;
     ///
     /// // Later, ensure durability
@@ -280,7 +280,7 @@ impl Database {
     /// # }
     /// ```
     pub async fn synchronize(&self) -> Result<(), Error> {
-        self.inner.synchronize().await
+        self.inner.flush().await
     }
 
     /// Deletes a key with custom write options.
@@ -291,14 +291,14 @@ impl Database {
     /// # Arguments
     ///
     /// * `key` - The key to delete
-    /// * `opts` - Write options (e.g., `sync` flag)
+    /// * `opts` - Write options (e.g., `flush` flag)
     ///
     /// # Example
     ///
     /// ```no_run
     /// # use lsm::{Database, WriteOptions};
     /// # async fn example(db: &Database) -> Result<(), lsm::Error> {
-    /// let opts = WriteOptions { sync: true };
+    /// let opts = WriteOptions { flush: true };
     /// db.delete_opts(b"key".to_vec(), &opts).await?;
     /// # Ok(())
     /// # }
@@ -346,7 +346,7 @@ impl Database {
     ///
     /// * `key` - The key to insert or update
     /// * `value` - The value to associate with the key
-    /// * `opts` - Write options (e.g., `sync` flag for durability control)
+    /// * `opts` - Write options (e.g., `flush` flag for durability control)
     ///
     /// # Example
     ///
@@ -354,7 +354,7 @@ impl Database {
     /// # use lsm::{Database, WriteOptions};
     /// # async fn example(db: &Database) -> Result<(), lsm::Error> {
     /// // Fast asynchronous write
-    /// let opts = WriteOptions { sync: false };
+    /// let opts = WriteOptions { flush: false };
     /// db.put_opts(b"key".to_vec(), b"value".to_vec(), &opts).await?;
     /// # Ok(())
     /// # }
@@ -521,7 +521,7 @@ impl Database {
     /// # Arguments
     ///
     /// * `write_batch` - A batch of put and delete operations
-    /// * `opts` - Write options (e.g., `sync` flag)
+    /// * `opts` - Write options (e.g., `flush` flag)
     ///
     /// # Example
     ///
@@ -531,7 +531,7 @@ impl Database {
     /// let mut batch = WriteBatch::new();
     /// batch.put(b"key1".to_vec(), b"value1".to_vec());
     ///
-    /// let opts = WriteOptions { sync: false };
+    /// let opts = WriteOptions { flush: false };
     /// db.write_opts(batch, &opts).await?;
     /// # Ok(())
     /// # }

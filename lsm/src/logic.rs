@@ -568,7 +568,7 @@ impl DbLogic {
         Ok((compaction_triggered, None))
     }
 
-    /// Synchronizes the write-ahead log to disk.
+    /// Flushes the write-ahead log to disk.
     ///
     /// Ensures all buffered writes are persisted to durable storage.
     ///
@@ -579,8 +579,8 @@ impl DbLogic {
     /// # Errors
     ///
     /// Returns an error if the fsync operation fails.
-    pub async fn synchronize(&self) -> Result<(), Error> {
-        self.wal.sync().await?;
+    pub async fn flush(&self) -> Result<(), Error> {
+        self.wal.flush().await?;
         Ok(())
     }
 
@@ -592,7 +592,7 @@ impl DbLogic {
     /// # Arguments
     ///
     /// * `write_batch` - Batch of put/delete operations to apply
-    /// * `opt` - Write options (e.g., whether to sync WAL)
+    /// * `opt` - Write options (e.g., whether to flush WAL)
     ///
     /// # Returns
     ///
@@ -635,7 +635,7 @@ impl DbLogic {
     /// # Arguments
     ///
     /// * `write_batch` - Batch of operations to log
-    /// * `opt` - Options controlling sync behavior
+    /// * `opt` - Options controlling flush behavior
     ///
     /// # Returns
     ///
@@ -643,7 +643,7 @@ impl DbLogic {
     ///
     /// # Errors
     ///
-    /// Returns an error if WAL append or sync fails.
+    /// Returns an error if WAL append or flush fails.
     async fn write_batch_to_wal(
         &self,
         write_batch: &WriteBatch,
@@ -653,8 +653,8 @@ impl DbLogic {
 
         let write_pos = self.wal.store(writes).await?;
 
-        if opt.sync {
-            self.wal.sync().await?;
+        if opt.flush {
+            self.wal.flush().await?;
         }
 
         Ok(write_pos)
@@ -800,9 +800,9 @@ impl DbLogic {
                 logger.l0_table_added();
             }
 
-            // Sync all value index changes to disk
+            // Flush all value index changes to disk
             #[cfg(feature = "wisckey")]
-            self.value_log.sync().await?;
+            self.value_log.flush().await?;
 
             // Then update manifest and flush WAL
             let seq_offset = mem.get().get_next_seq_number();
@@ -1146,7 +1146,7 @@ impl DbLogic {
             // Reinsert values, if needed to defragment
             // Old batches will eventually be removed as a result
             if !reinsert.writes.is_empty() {
-                let opts = WriteOptions { sync: true };
+                let opts = WriteOptions { flush: true };
                 self.write_opts(reinsert, &opts).await?;
             }
         }

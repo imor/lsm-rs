@@ -67,7 +67,7 @@ async fn iterate() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -100,7 +100,7 @@ async fn range_iterate() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -138,7 +138,7 @@ async fn range_iterate_random() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -180,7 +180,7 @@ async fn range_iterate_reverse() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -217,7 +217,7 @@ async fn range_iterate_empty() {
     const COUNT: u64 = 500;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -245,7 +245,7 @@ async fn range_iterate_overlap() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos:05}").into_bytes();
@@ -317,7 +317,7 @@ async fn range_iterate_sparse_keys() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     //Insert Sparse Key-Value pairs with a gap of 2500
     for pos in (0..COUNT).step_by(2500) {
@@ -355,7 +355,7 @@ async fn get_put_many() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -383,7 +383,7 @@ async fn get_put_many_random() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..count {
         let key = format!("key_{pos}").into_bytes();
@@ -409,7 +409,7 @@ async fn get_put_many_delay() {
     let (_tmpdir, database) = test_init().await;
 
     // Write with fsync to check persistence
-    let options = WriteOptions { sync: true };
+    let options = WriteOptions { flush: true };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -438,7 +438,7 @@ async fn get_put_delete_large_entry() {
 
     let (_tmpdir, database) = test_init().await;
 
-    let options = WriteOptions { sync: true };
+    let options = WriteOptions { flush: true };
 
     for _ in 0..10 {
         let key = "key_424245".to_string().into_bytes();
@@ -468,7 +468,7 @@ async fn get_put_delete_large_entry() {
 async fn get_put_delete_variable_entry() {
     let (_tmpdir, database) = test_init().await;
 
-    let options = WriteOptions { sync: true };
+    let options = WriteOptions { flush: true };
 
     // Test with variable sizes ranging from small to large
     let sizes = vec![1, 500, 1000, 2000];
@@ -502,7 +502,7 @@ async fn get_put_delete_many() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -530,7 +530,7 @@ async fn override_some() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -564,7 +564,7 @@ async fn override_one_random() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..COUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -607,7 +607,7 @@ async fn override_many() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..NCOUNT {
         let key = format!("key_{pos}").into_bytes();
@@ -656,7 +656,7 @@ async fn override_many_random() {
     let (_tmpdir, database) = test_init().await;
 
     // Write without fsync to speed up tests
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     for pos in 0..NCOUNT {
         let key = format!("key_{pos}").into_bytes();

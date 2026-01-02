@@ -215,8 +215,8 @@ impl WalWriter {
             {
                 let mut status = inner.status.write();
                 let to_write = std::mem::take(&mut status.queue);
-                let sync_requested = status.sync_requested;
-                let sync_pos = status.sync_pos;
+                let sync_requested = status.flush_requested;
+                let sync_pos = status.flush_pos;
                 let stop_requested = status.stop_requested;
 
                 let new_offset = if status.can_prune_pos > status.prune_pos {
@@ -231,7 +231,7 @@ impl WalWriter {
                 {
                     assert_eq!(self.position, status.write_pos);
 
-                    status.sync_requested = false;
+                    status.flush_requested = false;
                     break (
                         to_write,
                         sync_requested,
@@ -261,7 +261,7 @@ impl WalWriter {
         // because there is only one write-ahead writer
         if sync_requested && sync_pos < self.position {
             self.sync().await;
-            inner.status.write().sync_pos = self.position;
+            inner.status.write().flush_pos = self.position;
         }
 
         if let Some((new_offset, old_offset)) = new_offset {

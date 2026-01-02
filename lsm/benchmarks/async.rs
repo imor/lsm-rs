@@ -56,7 +56,7 @@ async fn main() {
 
     log::info!("Starting read/write benchmark");
 
-    let options = WriteOptions { sync: false };
+    let options = WriteOptions { flush: false };
 
     log::debug!("Writing {} entries", args.num_entries);
 
