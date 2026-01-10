@@ -208,7 +208,12 @@ impl Level {
     /// # Returns
     ///
     /// A `TableBuilder` configured for this level
-    pub fn build_table(&self, identifier: TableId, min_key: Key, max_key: Key) -> TableBuilder<'_> {
+    pub fn create_table_builder(
+        &self,
+        identifier: TableId,
+        min_key: Key,
+        max_key: Key,
+    ) -> TableBuilder<'_> {
         TableBuilder::new(
             identifier,
             &self.params,

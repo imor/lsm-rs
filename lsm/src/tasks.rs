@@ -57,7 +57,7 @@ pub trait Task: Sync + Send {
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum TaskType {
     /// Tasks that flush memtables to L0 SSTables on disk.
-    MemtableCompaction,
+    MemtableFlush,
     /// Tasks that compact SSTables between different levels.
     LevelCompaction,
 }
@@ -88,7 +88,7 @@ pub struct TaskManager {
     /// Global stop flag shared by all tasks.
     stop_flag: Arc<AtomicBool>,
     /// Map of task types to their corresponding task groups.
-    tasks: HashMap<TaskType, TaskGroup>,
+    task_groups: HashMap<TaskType, TaskGroup>,
 }
 
 /// A group of tasks that perform the same type of work.
@@ -113,11 +113,11 @@ struct UpdateCond {
 
 /// Task that handles flushing memtables to L0 SSTables.
 ///
-/// When a memtable is successfully flushed to L0, this task wakes up
+/// When a memtable is frozen, this task wakes up
 /// the level compaction tasks since new L0 tables may trigger compactions.
-struct MemtableCompactionTask {
+struct MemtableFlushTask {
     /// Reference to the database logic layer.
-    datastore: Arc<DbLogic>,
+    dblogic: Arc<DbLogic>,
     /// Condition variable to wake up level compaction tasks.
     level_update_cond: Arc<UpdateCond>,
 }
@@ -131,15 +131,15 @@ struct LevelCompactionTask {
     datastore: Arc<DbLogic>,
 }
 
-impl MemtableCompactionTask {
+impl MemtableFlushTask {
     /// Creates a new boxed memtable compaction task.
     ///
     /// # Arguments
     /// * `datastore` - Reference to the database logic layer
     /// * `level_update_cond` - Condition variable to notify level compaction tasks
-    fn new_boxed(datastore: Arc<DbLogic>, level_update_cond: Arc<UpdateCond>) -> Box<dyn Task> {
+    fn new_boxed(dblogic: Arc<DbLogic>, level_update_cond: Arc<UpdateCond>) -> Box<dyn Task> {
         Box::new(Self {
-            datastore,
+            dblogic,
             level_update_cond,
         })
     }
@@ -156,13 +156,13 @@ impl LevelCompactionTask {
 }
 
 #[async_trait]
-impl Task for MemtableCompactionTask {
+impl Task for MemtableFlushTask {
     /// Executes one memtable compaction operation.
     ///
     /// If a memtable was successfully flushed, wakes up level compaction tasks
     /// since new L0 tables may have been created.
     async fn run(&self) -> Result<bool, Error> {
-        let did_work = self.datastore.do_memtable_compaction().await?;
+        let did_work = self.dblogic.flush_frozen_memtable().await?;
         if did_work {
             self.level_update_cond.wake_up();
         }
@@ -220,8 +220,8 @@ impl TaskHandle {
     ///
     /// Returns `true` if the stop flag has not been set.
     #[inline(always)]
-    fn is_running(&self) -> bool {
-        !self.stop_flag.load(Ordering::SeqCst)
+    fn stop_requested(&self) -> bool {
+        self.stop_flag.load(Ordering::SeqCst)
     }
 
     /// Main work loop for the task.
@@ -246,9 +246,9 @@ impl TaskHandle {
                 tokio::pin!(fut);
 
                 {
-                    let lchange = self.update_cond.last_change.read();
+                    let last_change = self.update_cond.last_change.read();
 
-                    if !self.is_running() || !idle || *lchange > last_update {
+                    if self.stop_requested() || !idle || *last_change > last_update {
                         break;
                     }
 
@@ -259,7 +259,7 @@ impl TaskHandle {
                 fut.await;
             }
 
-            if !self.is_running() {
+            if self.stop_requested() {
                 break;
             }
 
@@ -287,57 +287,62 @@ impl TaskManager {
     ///
     /// Spawns one memtable compaction task and the specified number of level
     /// compaction tasks. All tasks start immediately and begin waiting for work.
-    pub async fn new(datastore: Arc<DbLogic>, num_compaction_tasks: usize) -> Self {
-        let mut tasks = HashMap::default();
+    pub async fn new(dblogic: Arc<DbLogic>, num_compaction_tasks: usize) -> Self {
+        let mut task_groups = HashMap::default();
         let stop_flag = Arc::new(AtomicBool::new(false));
 
         let memtable_update_cond = Arc::new(UpdateCond::new());
         let level_update_cond = Arc::new(UpdateCond::new());
 
+        // Spawn memtable flush task
         {
             let stop_flag = stop_flag.clone();
             let memtable_update_cond = memtable_update_cond.clone();
-            let datastore = datastore.clone();
             let level_update_cond = level_update_cond.clone();
+            let dblogic = dblogic.clone();
 
-            let hdl = TaskHandle::new(
+            let memtable_flush_task_handle = TaskHandle::new(
                 stop_flag,
                 memtable_update_cond,
-                MemtableCompactionTask::new_boxed(datastore, level_update_cond),
+                MemtableFlushTask::new_boxed(dblogic, level_update_cond),
             );
 
-            tokio::spawn(async move { hdl.work_loop().await });
+            tokio::spawn(async move { memtable_flush_task_handle.work_loop().await });
         }
 
         let task_group = TaskGroup {
             condition: memtable_update_cond,
         };
 
-        tasks.insert(TaskType::MemtableCompaction, task_group);
+        task_groups.insert(TaskType::MemtableFlush, task_group);
 
+        // Spawn level compaction tasks
         {
             for _ in 0..num_compaction_tasks {
                 let stop_flag = stop_flag.clone();
                 let level_update_cond = level_update_cond.clone();
-                let datastore = datastore.clone();
+                let dblogic = dblogic.clone();
 
-                let hdl = TaskHandle::new(
+                let level_compaction_task_handle = TaskHandle::new(
                     stop_flag,
                     level_update_cond,
-                    LevelCompactionTask::new_boxed(datastore),
+                    LevelCompactionTask::new_boxed(dblogic),
                 );
 
-                tokio::spawn(async move { hdl.work_loop().await });
+                tokio::spawn(async move { level_compaction_task_handle.work_loop().await });
             }
 
             let task_group = TaskGroup {
                 condition: level_update_cond,
             };
 
-            tasks.insert(TaskType::LevelCompaction, task_group);
+            task_groups.insert(TaskType::LevelCompaction, task_group);
         }
 
-        Self { stop_flag, tasks }
+        Self {
+            stop_flag,
+            task_groups,
+        }
     }
 
     /// Wakes up tasks of the specified type.
@@ -352,18 +357,15 @@ impl TaskManager {
     /// Panics if the task type is not registered.
     #[tracing::instrument(skip(self))]
     pub fn wake_up(&self, task_type: &TaskType) {
-        let task_group = self.tasks.get(task_type).expect("No such task");
+        let task_group = self.task_groups.get(task_type).expect("No such task group");
         task_group.condition.wake_up();
     }
 
     /// Terminates all tasks immediately (legacy method).
-    ///
-    /// Note: This appears to have a bug - it sets the stop flag to `false` instead of `true`.
-    /// Use `stop_all()` for proper graceful shutdown.
     pub fn terminate(&self) {
-        self.stop_flag.store(false, Ordering::SeqCst);
+        self.stop_flag.store(true, Ordering::SeqCst);
 
-        for (_, task_group) in self.tasks.iter() {
+        for (_, task_group) in self.task_groups.iter() {
             task_group.condition.condition.notify_one();
         }
     }
@@ -381,7 +383,7 @@ impl TaskManager {
 
         self.stop_flag.store(true, Ordering::SeqCst);
 
-        for (_, task_group) in self.tasks.iter() {
+        for (_, task_group) in self.task_groups.iter() {
             task_group.condition.condition.notify_waiters();
         }
 

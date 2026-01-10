@@ -545,7 +545,7 @@ impl Database {
         let needs_compaction = self.inner.write_opts(write_batch, opts).await?;
 
         if needs_compaction {
-            self.tasks.wake_up(&TaskType::MemtableCompaction);
+            self.tasks.wake_up(&TaskType::MemtableFlush);
         }
 
         Ok(())

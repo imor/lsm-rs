@@ -208,7 +208,7 @@ impl Database {
         self.tokio_rt.block_on(async move {
             let needs_compaction = inner.write_opts(write_batch, opts).await?;
             if needs_compaction {
-                self.tasks.wake_up(&TaskType::MemtableCompaction);
+                self.tasks.wake_up(&TaskType::MemtableFlush);
             }
 
             Ok(())

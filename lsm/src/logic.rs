@@ -741,32 +741,33 @@ impl DbLogic {
     ///
     /// Returns an error if table creation, manifest update, or WAL operations fail.
     #[tracing::instrument(skip(self))]
-    pub async fn do_memtable_compaction(&self) -> Result<bool, Error> {
-        log::trace!("Attempting memtable compaction");
+    pub async fn flush_frozen_memtable(&self) -> Result<bool, Error> {
+        log::trace!("Flushing frozen memtable");
 
         // SAFETY
-        // Only one task will do the memtable compaction, so it is
+        // Only one task will flush frozen memtables, so it is
         // fine to not hold the lock the entire time
 
-        let to_compact = self.imm_memtables.read().await.front().cloned();
+        let to_flush = self.imm_memtables.read().await.front().cloned();
 
-        if let Some((log_offset, mem)) = to_compact {
-            log::trace!("Found memtable to compact");
+        if let Some((log_offset, frozen_memtable)) = to_flush {
+            log::trace!("Found memtable to flush");
 
             // First create table
-            let (min_key, max_key) = mem.get().get_min_max_key();
+            let (min_key, max_key) = frozen_memtable.get().get_min_max_key();
             let l0 = self.levels.first().unwrap();
             let table_id = self.manifest.generate_next_table_id().await;
-            let mut table_builder = l0.build_table(table_id, min_key.to_vec(), max_key.to_vec());
+            let mut table_builder =
+                l0.create_table_builder(table_id, min_key.to_vec(), max_key.to_vec());
 
-            let memtable_entries = mem.get().get_entries();
+            let memtable_entries = frozen_memtable.get().get_entries();
 
             cfg_if! {
                 if #[cfg(feature="wisckey")] {
                     let mut vbuilder = self.value_log.make_batch().await;
 
-                    for (key, mem_entry) in memtable_entries {
-                        match mem_entry {
+                    for (key, entry) in memtable_entries {
+                        match entry {
                             MemtableEntry::Value{seq_number, value} => {
                                 let value_ref = vbuilder.add_entry(&key, &value).await;
                                 table_builder.add_value(&key, seq_number, value_ref).await?;
@@ -779,8 +780,8 @@ impl DbLogic {
 
                     vbuilder.finish().await?;
                 } else {
-                    for (key, mem_entry) in memtable_entries {
-                        match mem_entry {
+                    for (key, entry) in memtable_entries {
+                        match entry {
                             MemtableEntry::Value{seq_number, value} => {
                                 table_builder.add_value(&key, seq_number, &value).await?;
                             }
@@ -793,7 +794,6 @@ impl DbLogic {
             }
 
             let table = table_builder.finish().await?;
-            let table_id = table.get_id();
             l0.add_l0_table(table).await;
 
             if let Some(logger) = &self.level_logger {
@@ -805,7 +805,7 @@ impl DbLogic {
             self.value_log.flush().await?;
 
             // Then update manifest and flush WAL
-            let seq_offset = mem.get().get_next_seq_number();
+            let seq_offset = frozen_memtable.get().get_next_seq_number();
             self.manifest.set_seq_number_offset(seq_offset).await;
             self.manifest
                 .update_table_set(vec![(0, table_id)], vec![])
@@ -825,7 +825,7 @@ impl DbLogic {
 
             Ok(true)
         } else {
-            log::trace!("Found no memtable to compact");
+            log::trace!("Found no frozen memtable to flush");
             Ok(false)
         }
     }
@@ -994,7 +994,7 @@ impl DbLogic {
         #[cfg(feature = "wisckey")]
         let mut deleted_values = vec![];
 
-        let mut table_builder = child_level.build_table(table_id, min_key, max_key);
+        let mut table_builder = child_level.create_table_builder(table_id, min_key, max_key);
 
         loop {
             log::trace!("Starting compaction for next key");
@@ -1303,7 +1303,7 @@ mod tests {
             let min_key = "000".to_string().into_bytes();
             let max_key = "100".to_string().into_bytes();
 
-            let mut table_builder = level.build_table(table_id, min_key, max_key);
+            let mut table_builder = level.create_table_builder(table_id, min_key, max_key);
             let mut seq_offset = 1;
 
             for num in 0..=100 {
@@ -1370,7 +1370,7 @@ mod tests {
             let min_key = "000".to_string().into_bytes();
             let max_key = "100".to_string().into_bytes();
 
-            let mut table_builder = l0.build_table(table_id, min_key, max_key);
+            let mut table_builder = l0.create_table_builder(table_id, min_key, max_key);
             let mut seq_offset = 1;
 
             for num in 0..=100 {
@@ -1434,7 +1434,7 @@ mod tests {
             let min_key = format!("{pos:04}").into_bytes();
             let max_key = format!("{next_pos:04}").into_bytes();
 
-            let mut table_builder = l0.build_table(table_id, min_key, max_key);
+            let mut table_builder = l0.create_table_builder(table_id, min_key, max_key);
             let mut seq_offset = 1;
 
             for num in pos..next_pos {
@@ -1511,7 +1511,7 @@ mod tests {
             let min_key = "000".to_string().into_bytes();
             let max_key = "100".to_string().into_bytes();
 
-            let mut table_builder = l0.build_table(table_id, min_key, max_key);
+            let mut table_builder = l0.create_table_builder(table_id, min_key, max_key);
             let mut seq_offset = 1;
 
             for num in 0..=100 {
@@ -1571,7 +1571,7 @@ mod tests {
             let min_key = format!("{pos:04}").into_bytes();
             let max_key = format!("{next_pos:04}").into_bytes();
 
-            let mut table_builder = l0.build_table(table_id, min_key, max_key);
+            let mut table_builder = l0.create_table_builder(table_id, min_key, max_key);
             let mut seq_offset = 1;
 
             for num in pos..next_pos {
