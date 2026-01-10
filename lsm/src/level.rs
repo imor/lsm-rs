@@ -350,69 +350,105 @@ impl Level {
     #[tracing::instrument(skip(self))]
     pub async fn maybe_start_compaction(&self) -> Result<Option<Vec<Arc<SortedTable>>>, ()> {
         log::trace!("Checking if we should compact level");
+
+        // Acquire a read lock on the sorted tables collection to inspect them
+        // without blocking other readers during the decision process
         let all_tables = self.sorted_tables.read().await;
 
+        // Step 1: Determine if compaction is needed and select the initial table
+        // Uses a labeled block to allow early exit via 'break 'choice'
         let (table, offset) = 'choice: {
+            // Lock the compaction offset counter to prevent concurrent modifications
+            // during table selection (uses parking_lot Mutex for low latency)
             let mut next_offset = self.next_compaction_offset.lock();
 
+            // Step 1a: Check if size-based compaction is triggered
+            // - For L0: Triggered when number of tables exceeds threshold (4 tables)
+            // - For L1+: Triggered when total size exceeds max_size() for this level
             let size_based_compaction = if self.index == 0 {
+                // L0 uses table count as the trigger
                 all_tables.len() > L0_COMPACTION_TRIGGER
             } else {
+                // L1+ levels use total size as the trigger
                 let total_size: usize = all_tables.iter().map(|table| table.get_size()).sum();
                 total_size > self.max_size()
             };
 
-            // Prefer size-based compaction over seek-based compaction
+            // Step 1b: Size-based compaction has priority over seek-based compaction
             if size_based_compaction {
+                // Sanity check: ensure we have tables to compact
                 if all_tables.is_empty() {
                     panic!("Cannot start compaction; level {} is empty", self.index);
                 }
 
+                // Round-robin scheduling: wrap around if offset exceeds table count
+                // This ensures fair selection across all tables over time
                 if *next_offset >= all_tables.len() {
                     *next_offset = 0;
                 }
 
+                // Select the table at the current offset position
                 let offset = *next_offset;
                 let table = all_tables[offset].clone();
 
+                // Advance the offset for the next compaction cycle
                 *next_offset += 1;
 
+                // Return the selected table and its offset
                 (table, offset)
             } else {
+                // Step 1c: Check for seek-based compaction as a fallback
+                // This triggers when a table has been read too many times
                 let table_id = self.seek_based_compaction.load(Ordering::SeqCst);
 
+                // If a table is marked for seek-based compaction, find it in our collection
                 if table_id != INVALID_TABLE_ID
                     && let Some((offset, table)) = all_tables
                         .iter()
                         .enumerate()
                         .find(|(_, table)| table.get_id() == table_id)
                 {
+                    // Found the table marked for seek-based compaction
                     break 'choice (table.clone(), offset);
                 }
 
+                // No compaction needed at this time
                 return Ok(None);
             }
         };
+        // The compaction offset lock is automatically released here
 
-        // Try to set the compaction flag
-        // otherwise, we abort (due to concurrency)
+        // Step 2: Attempt to lock the selected table for compaction
+        // This prevents concurrent compactions from operating on the same table
         if !table.start_compaction() {
+            // Another thread already started compacting this table - abort
             return Err(());
         }
 
+        // Step 3: Initialize the compaction set with the selected table
+        // For L1+ this will typically be the only table, but L0 may add more
         let mut tables = vec![table];
         let mut offsets = vec![offset];
 
-        // Level 0 might have overlapping tables
+        // Step 4: For L0, find all overlapping tables to compact together
+        // L0 is special because tables can have overlapping key ranges
         if self.index == 0 {
+            // Track the current key range covered by selected tables
             let mut min = tables[0].get_min().to_vec();
             let mut max = tables[0].get_max().to_vec();
 
+            // Step 4a: Iteratively expand the selection to include all overlapping tables
+            // This is necessary because adding a table can expand the range, which might
+            // overlap with additional tables not yet considered
             //TODO how greedy should this be?
             let mut change = true;
             while change {
+                // Assume no changes this iteration; set to true if we add a table
                 change = false;
+
+                // Step 4b: Check each table for overlap with our current range
                 for (pos, table) in all_tables.iter().enumerate() {
+                    // Skip tables already selected for compaction
                     let mut found = false;
                     for offset in offsets.iter() {
                         if pos == *offset {
@@ -425,17 +461,25 @@ impl Level {
                         continue;
                     }
 
+                    // Step 4c: If this table overlaps with our range, include it
                     if table.overlaps(&min, &max) {
+                        // Try to lock this table for compaction
                         if table.start_compaction() {
+                            // Expand the key range to include this table's keys
                             min = std::cmp::min(&min[..], table.get_min()).to_vec();
                             max = std::cmp::max(&max[..], table.get_max()).to_vec();
 
+                            // Add this table to the compaction set
                             offsets.push(pos);
                             tables.push(table.clone());
+
+                            // Mark that we made a change; need another iteration
+                            // to check if this expanded range overlaps with more tables
                             change = true;
                             break;
                         } else {
-                            // Lock contention!
+                            // Step 4d: Failed to lock an overlapping table (lock contention)
+                            // Must abort and release all locks to avoid partial compactions
                             for table in tables {
                                 table.stop_compaction();
                             }
@@ -446,6 +490,8 @@ impl Level {
             }
         }
 
+        // Step 5: Successfully selected and locked all necessary tables
+        // Return the complete set of tables to compact
         Ok(Some(tables))
     }
 
