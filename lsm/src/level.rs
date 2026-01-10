@@ -39,6 +39,12 @@ use parking_lot::Mutex as PMutex;
 /// TODO: add slowdown writes trigger
 const L0_COMPACTION_TRIGGER: usize = 4;
 
+/// Base size for level 1 in bytes (1 MB).
+const BASE_LEVEL_SIZE: usize = 1_048_576;
+
+/// Size multiplier between consecutive levels.
+const LEVEL_SIZE_MULTIPLIER: usize = 10;
+
 /// Vector of sorted tables wrapped in Arc for shared ownership.
 pub type TableVec = Vec<Arc<SortedTable>>;
 
@@ -98,7 +104,7 @@ pub struct Level {
     /// Shared data block cache and I/O handler.
     data_blocks: Arc<DataBlocks>,
     /// Collection of sorted tables at this level.
-    tables: RwLock<TableVec>,
+    sorted_tables: RwLock<TableVec>,
     /// Database configuration parameters.
     params: Arc<Params>,
     /// Manifest for tracking table metadata and generating IDs.
@@ -134,7 +140,7 @@ impl Level {
             data_blocks,
             seek_based_compaction: AtomicU64::new(INVALID_TABLE_ID),
             next_compaction_offset: PMutex::new(0),
-            tables: RwLock::new(vec![]),
+            sorted_tables: RwLock::new(vec![]),
             table_placeholders: RwLock::new(vec![]),
         }
     }
@@ -190,7 +196,7 @@ impl Level {
     pub async fn load_table(&self, id: TableId) -> Result<(), Error> {
         let table = SortedTable::load(id, self.data_blocks.clone(), &self.params).await?;
 
-        let mut tables = self.tables.write().await;
+        let mut tables = self.sorted_tables.write().await;
         tables.push(Arc::new(table));
 
         log::trace!("Loaded table {id} on level {}", self.index);
@@ -243,7 +249,7 @@ impl Level {
     /// Panics if called on a level other than L0.
     pub async fn add_l0_table(&self, table: SortedTable) {
         assert_eq!(self.index, 0);
-        let mut tables = self.tables.write().await;
+        let mut tables = self.sorted_tables.write().await;
         tables.push(Arc::new(table));
     }
 
@@ -263,7 +269,7 @@ impl Level {
     /// - `Option<DataEntry>`: The data entry if found, `None` otherwise
     #[tracing::instrument(skip(self,key), fields(index=self.index))]
     pub async fn get(&self, key: &[u8]) -> (bool, Option<DataEntry>) {
-        let tables = self.tables.read().await;
+        let tables = self.sorted_tables.read().await;
         let mut compaction_triggered = false;
 
         // Iterate from back to front (newest to oldest)
@@ -319,14 +325,11 @@ impl Level {
 
         // Result for both level-0 and level-1
         // This doesn't include the size of the values (for now)
-        let mut result: usize = 1048576;
-        let mut level = self.index;
-        while level > 1 {
-            result *= 10;
-            level -= 1;
+        if self.index <= 1 {
+            BASE_LEVEL_SIZE
+        } else {
+            BASE_LEVEL_SIZE * LEVEL_SIZE_MULTIPLIER.pow(self.index - 1)
         }
-
-        result
     }
 
     /// Checks if compaction should start and selects tables to compact.
@@ -347,7 +350,7 @@ impl Level {
     #[tracing::instrument(skip(self))]
     pub async fn maybe_start_compaction(&self) -> Result<Option<Vec<Arc<SortedTable>>>, ()> {
         log::trace!("Checking if we should compact level");
-        let all_tables = self.tables.read().await;
+        let all_tables = self.sorted_tables.read().await;
 
         let (table, offset) = 'choice: {
             let mut next_offset = self.next_compaction_offset.lock();
@@ -355,12 +358,7 @@ impl Level {
             let size_based_compaction = if self.index == 0 {
                 all_tables.len() > L0_COMPACTION_TRIGGER
             } else {
-                let mut total_size = 0;
-
-                for t in all_tables.iter() {
-                    total_size += t.get_size();
-                }
-
+                let total_size: usize = all_tables.iter().map(|table| table.get_size()).sum();
                 total_size > self.max_size()
             };
 
@@ -383,14 +381,13 @@ impl Level {
             } else {
                 let table_id = self.seek_based_compaction.load(Ordering::SeqCst);
 
-                if table_id != INVALID_TABLE_ID {
-                    for (pos, table) in all_tables.iter().enumerate() {
-                        if table.get_id() == table_id {
-                            self.seek_based_compaction
-                                .store(INVALID_TABLE_ID, Ordering::SeqCst);
-                            break 'choice (table.clone(), pos);
-                        }
-                    }
+                if table_id != INVALID_TABLE_ID
+                    && let Some((offset, table)) = all_tables
+                        .iter()
+                        .enumerate()
+                        .find(|(_, table)| table.get_id() == table_id)
+                {
+                    break 'choice (table.clone(), offset);
                 }
 
                 return Ok(None);
@@ -484,7 +481,7 @@ impl Level {
         fast_path: Option<TableId>,
     ) -> Option<(TableId, Vec<Arc<SortedTable>>)> {
         let mut tables_to_compact: Vec<Arc<SortedTable>> = Vec::new();
-        let tables = self.tables.read().await;
+        let tables = self.sorted_tables.read().await;
 
         let mut min = min;
         let mut max = max;
@@ -541,7 +538,7 @@ impl Level {
     /// A write guard providing mutable access to the table vector
     #[inline]
     pub async fn get_tables_rw(&self) -> tokio::sync::RwLockWriteGuard<'_, TableVec> {
-        self.tables.write().await
+        self.sorted_tables.write().await
     }
 
     /// Acquires a shared read lock on the table collection.
@@ -551,6 +548,97 @@ impl Level {
     /// A read guard providing immutable access to the table vector
     #[inline]
     pub async fn get_tables_ro(&self) -> tokio::sync::RwLockReadGuard<'_, TableVec> {
-        self.tables.read().await
+        self.sorted_tables.read().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::Builder;
+    use tokio::test as async_test;
+
+    async fn create_test_level(index: LevelId) -> Level {
+        let tmp_dir = Builder::new().prefix("lsm-level-test-").tempdir().unwrap();
+
+        let params = Arc::new(Params {
+            db_path: tmp_dir.path().to_path_buf(),
+            ..Default::default()
+        });
+
+        let manifest = Arc::new(Manifest::new(params.clone()).await);
+        let data_blocks = Arc::new(DataBlocks::new(params.clone(), manifest.clone()));
+
+        Level::new(index, data_blocks, params, manifest)
+    }
+
+    #[async_test]
+    async fn test_max_size_level_0() {
+        let level = create_test_level(0).await;
+        assert_eq!(level.max_size(), BASE_LEVEL_SIZE);
+        assert_eq!(level.max_size(), 1_048_576);
+    }
+
+    #[async_test]
+    async fn test_max_size_level_1() {
+        let level = create_test_level(1).await;
+        assert_eq!(level.max_size(), BASE_LEVEL_SIZE);
+        assert_eq!(level.max_size(), 1_048_576);
+    }
+
+    #[async_test]
+    async fn test_max_size_level_2() {
+        let level = create_test_level(2).await;
+        // Level 2: BASE_LEVEL_SIZE * 10^(2-1) = 1MB * 10 = 10MB
+        assert_eq!(level.max_size(), BASE_LEVEL_SIZE * 10);
+        assert_eq!(level.max_size(), 10_485_760);
+    }
+
+    #[async_test]
+    async fn test_max_size_level_3() {
+        let level = create_test_level(3).await;
+        // Level 3: BASE_LEVEL_SIZE * 10^(3-1) = 1MB * 100 = 100MB
+        assert_eq!(level.max_size(), BASE_LEVEL_SIZE * 100);
+        assert_eq!(level.max_size(), 104_857_600);
+    }
+
+    #[async_test]
+    async fn test_max_size_level_4() {
+        let level = create_test_level(4).await;
+        // Level 4: BASE_LEVEL_SIZE * 10^(4-1) = 1MB * 1000 = 1000MB
+        assert_eq!(level.max_size(), BASE_LEVEL_SIZE * 1000);
+        assert_eq!(level.max_size(), 1_048_576_000);
+    }
+
+    #[async_test]
+    async fn test_max_size_progression() {
+        // Test that each level is 10x the size of the previous level
+        let level1 = create_test_level(1).await;
+        let level2 = create_test_level(2).await;
+        let level3 = create_test_level(3).await;
+        let level4 = create_test_level(4).await;
+
+        assert_eq!(level2.max_size(), level1.max_size() * LEVEL_SIZE_MULTIPLIER);
+        assert_eq!(level3.max_size(), level2.max_size() * LEVEL_SIZE_MULTIPLIER);
+        assert_eq!(level4.max_size(), level3.max_size() * LEVEL_SIZE_MULTIPLIER);
+    }
+
+    #[async_test]
+    async fn test_max_size_uses_pow_correctly() {
+        // Verify the formula: BASE_LEVEL_SIZE * LEVEL_SIZE_MULTIPLIER^(index-1)
+        for index in 0..=6 {
+            let level = create_test_level(index).await;
+            let expected = if index <= 1 {
+                BASE_LEVEL_SIZE
+            } else {
+                BASE_LEVEL_SIZE * LEVEL_SIZE_MULTIPLIER.pow(index - 1)
+            };
+            assert_eq!(
+                level.max_size(),
+                expected,
+                "Level {} max_size mismatch",
+                index
+            );
+        }
     }
 }

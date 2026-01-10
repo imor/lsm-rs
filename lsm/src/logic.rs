@@ -707,7 +707,7 @@ impl DbLogic {
             // Why it's needed:
             // Prevents the database from accepting writes faster than it can flush them to disk
             // Without this, you could accumulate many immutable memtables in memory, leading to OOM
-            // The condition variable is notified in do_memtable_compaction() after a memtable is successfully flushed:
+            // The condition variable is notified in flush_frozen_memtable() after a memtable is successfully flushed:
             //
             // self.imm_cond.notify_all();
             //
