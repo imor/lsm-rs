@@ -907,39 +907,37 @@ impl DbLogic {
     ) -> Result<CompactResult, Error> {
         assert_eq!(parent_level.get_index() + 1, child_level.get_index());
 
-        let parent_tbls_to_compact = match parent_level.maybe_start_compaction().await {
+        let parent_tables_to_compact = match parent_level.maybe_start_compaction().await {
             Ok(Some(result)) => result,
             Ok(None) => return Ok(CompactResult::NothingToDo),
             Err(()) => return Ok(CompactResult::Locked),
         };
-        assert!(!parent_tbls_to_compact.is_empty());
+        assert!(!parent_tables_to_compact.is_empty());
 
         log::trace!("Starting compaction on level {}", parent_level.get_index());
 
-        let mut min_key = parent_tbls_to_compact[0].get_min();
-        let mut max_key = parent_tbls_to_compact[0].get_max();
+        let (min_key, max_key) = parent_tables_to_compact.iter().fold(
+            (
+                parent_tables_to_compact[0].get_min(),
+                parent_tables_to_compact[0].get_max(),
+            ),
+            |(min, max), table| (min.min(table.get_min()), max.max(table.get_max())),
+        );
 
-        if parent_tbls_to_compact.len() > 1 {
-            for table in parent_tbls_to_compact[1..].iter() {
-                min_key = min_key.min(table.get_min());
-                max_key = max_key.max(table.get_max());
-            }
-        }
-
-        let overlap_result = if parent_tbls_to_compact.len() == 1 {
+        let overlap_result = if parent_tables_to_compact.len() == 1 {
             child_level
-                .get_overlaps(min_key, max_key, Some(parent_tbls_to_compact[0].get_id()))
+                .get_overlaps(min_key, max_key, Some(parent_tables_to_compact[0].get_id()))
                 .await
         } else {
             child_level.get_overlaps(min_key, max_key, None).await
         };
 
         // Abort due to concurrency?
-        let (table_id, child_tbls_to_compact) = match overlap_result {
+        let (table_id, child_tables_to_compact) = match overlap_result {
             Some(res) => res,
             None => {
                 log::trace!("Aborting compaction due to concurrency");
-                for parent_table in parent_tbls_to_compact {
+                for parent_table in parent_tables_to_compact {
                     parent_table.stop_compaction();
                 }
                 return Ok(CompactResult::NothingToDo);
@@ -947,8 +945,8 @@ impl DbLogic {
         };
 
         // Fast path
-        if parent_tbls_to_compact.len() == 1 && child_tbls_to_compact.is_empty() {
-            assert_eq!(parent_tbls_to_compact[0].get_id(), table_id);
+        if parent_tables_to_compact.len() == 1 && child_tables_to_compact.is_empty() {
+            assert_eq!(parent_tables_to_compact[0].get_id(), table_id);
             self.fast_compaction(parent_level, child_level, table_id)
                 .await;
             return Ok(CompactResult::DidWork);
@@ -959,16 +957,17 @@ impl DbLogic {
 
         log::debug!(
             "Compacting {} table(s) in level {} with {} table(s) in level {} into table #{table_id}",
-            parent_tbls_to_compact.len(),
+            parent_tables_to_compact.len(),
             parent_level.get_index(),
-            child_tbls_to_compact.len(),
+            child_tables_to_compact.len(),
             child_level.get_index(),
         );
 
-        for table in child_tbls_to_compact.iter() {
-            min_key = min_key.min(table.get_min());
-            max_key = max_key.max(table.get_max());
-        }
+        let (min_key, max_key) = child_tables_to_compact
+            .iter()
+            .fold((min_key, max_key), |(min, max), table| {
+                (min.min(table.get_min()), max.max(table.get_max()))
+            });
 
         // Table can potentially contain a single entry
         assert!(min_key <= max_key);
@@ -977,11 +976,11 @@ impl DbLogic {
         let max_key = max_key.to_vec();
 
         let mut table_iters = Vec::new();
-        for table in parent_tbls_to_compact.iter() {
+        for table in parent_tables_to_compact.iter() {
             table_iters.push(TableIterator::new(table.clone(), false).await);
         }
 
-        for child in child_tbls_to_compact.iter() {
+        for child in child_tables_to_compact.iter() {
             table_iters.push(TableIterator::new(child.clone(), false).await);
         }
 
@@ -1089,7 +1088,7 @@ impl DbLogic {
         let mut all_child_tables = child_level.get_tables_rw().await;
 
         // Remove all previous child tables
-        for table in child_tbls_to_compact.iter() {
+        for table in child_tables_to_compact.iter() {
             let mut found = false;
             for (pos, other_table) in all_child_tables.iter().enumerate() {
                 if other_table.get_id() == table.get_id() {
@@ -1116,7 +1115,7 @@ impl DbLogic {
         child_level.remove_table_placeholder(table_id).await;
 
         // Remove table entries from parent level
-        for table in parent_tbls_to_compact.iter() {
+        for table in parent_tables_to_compact.iter() {
             let mut found = false;
             for (pos, other_table) in all_parent_tables.iter().enumerate() {
                 if other_table.get_id() == table.get_id() {
@@ -1186,13 +1185,13 @@ impl DbLogic {
 
         // Remove table entry from parent level
         let table = {
-            let mut iter = all_parent_tables.iter().enumerate();
-
-            loop {
-                let (pos, other_table) = iter.next().expect("Entry for parent table not found");
-                if other_table.get_id() == table_id {
-                    break all_parent_tables.remove(pos);
-                }
+            if let Some(i) = all_parent_tables
+                .iter()
+                .position(|table| table.get_id() == table_id)
+            {
+                all_parent_tables.remove(i)
+            } else {
+                panic!("Entry for parent table not found");
             }
         };
 
@@ -1204,23 +1203,20 @@ impl DbLogic {
         );
 
         // Figure out where to place the table on the child lavel
-        let mut new_pos = 0;
-        for (pos, other_table) in all_child_tables.iter().enumerate() {
-            if other_table.get_min() > table.get_min() {
-                new_pos = pos;
-                break;
-            }
-        }
+        let new_pos = all_child_tables
+            .iter()
+            .position(|child_table| child_table.get_min() > table.get_min())
+            .unwrap_or_default();
 
         // Add table to child level
         all_child_tables.insert(new_pos, table.clone());
         child_level.remove_table_placeholder(table_id).await;
 
-        for (pos, other_table) in all_parent_tables.iter().enumerate() {
-            if table.get_id() == other_table.get_id() {
-                all_parent_tables.remove(pos);
-                break;
-            }
+        if let Some(pos) = all_parent_tables
+            .iter()
+            .position(|parent_table| parent_table.get_id() == table.get_id())
+        {
+            all_parent_tables.remove(pos);
         }
 
         // Update manifest

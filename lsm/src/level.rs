@@ -170,11 +170,12 @@ impl Level {
     /// Panics if no placeholder with the given ID exists.
     pub async fn remove_table_placeholder(&self, id: TableId) {
         let mut placeholders = self.table_placeholders.write().await;
-        for (pos, placeholder) in placeholders.iter().enumerate() {
-            if placeholder.id == id {
-                placeholders.remove(pos);
-                return;
-            }
+        if let Some(pos) = placeholders
+            .iter()
+            .position(|placeholder| placeholder.id == id)
+        {
+            placeholders.remove(pos);
+            return;
         }
 
         panic!("no such placeholder");
@@ -532,11 +533,11 @@ impl Level {
         let mut min = min;
         let mut max = max;
 
-        for table in tables.iter() {
+        for table in &*tables {
             if table.overlaps(min, max) {
                 if !table.start_compaction() {
                     // Abort
-                    for table in tables_to_compact.into_iter() {
+                    for table in tables_to_compact {
                         table.stop_compaction();
                     }
                     return None;
@@ -551,7 +552,7 @@ impl Level {
         // set placeholder to avoid race conditions
         // and abort if one exists
         let mut placeholders = self.table_placeholders.write().await;
-        for placeholder in placeholders.iter() {
+        for placeholder in &*placeholders {
             if placeholder.overlaps(min, max) {
                 for table in tables_to_compact {
                     table.stop_compaction();
