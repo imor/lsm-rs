@@ -855,24 +855,20 @@ impl DbLogic {
         log::trace!("Attempting level compaction");
 
         // level-to-level compaction
-        for (level_pos, level) in self.levels.iter().enumerate() {
-            // Last level cannot be compacted
-            if level_pos < self.params.num_levels - 1 {
-                match self
-                    .compact_level(level, &self.levels[level_pos + 1])
-                    .await?
-                {
-                    CompactResult::DidWork => {
-                        log::trace!("Compacted level {level_pos}");
-                        return Ok(true);
-                    }
-                    CompactResult::Locked => {
-                        log::trace!("Cannot compact level {level_pos} right now; lock was held");
-                        was_locked = true;
-                    }
-                    CompactResult::NothingToDo => {
-                        log::trace!("Nothing to do for level {level_pos}");
-                    }
+        for levels in self.levels.windows(2) {
+            let (parent, child) = (&levels[0], &levels[1]);
+            let level_id = parent.get_index();
+            match self.compact_level(parent, child).await? {
+                CompactResult::DidWork => {
+                    log::trace!("Compacted level {level_id}");
+                    return Ok(true);
+                }
+                CompactResult::Locked => {
+                    log::trace!("Cannot compact level {level_id} right now; lock was held");
+                    was_locked = true;
+                }
+                CompactResult::NothingToDo => {
+                    log::trace!("Nothing to do for level {level_id}");
                 }
             }
         }
